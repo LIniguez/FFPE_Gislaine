@@ -1,0 +1,32 @@
+samp<-"AKIKO" #just the name of the output
+
+read_multiple<-function(x, name, col){
+  lapply(lfile, function(x) {
+    z <-read.delim(x,header=T,skip=1)[,col]
+    #colnames(z)<-c(name,paste0(strsplit(x,split="/")[[1]][1],'_',strsplit(x,split="/")[[1]][2]))    #You need to check this because in my case I have my outputs saved in a folder named after the sample. Example :SRR497707/XXXYYY- -telescope_report.tsv but you need to check this
+    colnames(z)<-c(name,strsplit(x,split="/")[[1]][2])
+    z
+  })}   #this function is for reading multiple files
+
+lfile<-list.files(pattern='abundance.tsv', recursive=T) #find all files with that name
+datatemp <- read_multiple(lfile, name="Gene", col=c(1,4)) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+file1<-paste0("Gene_table_mbendall_",samp,".txt")
+write.table(datos, file=file1, quote=F, sep='\t', row.names=F)
+
+lfile<-list.files(pattern='HERV-telescope_report.tsv', recursive=T) #find all files with that name
+datatemp <- read_multiple(lfile, name="Gene", col=c(1,4)) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+datos<-datos[grep(datos$Gene,pattern = "__no_feature",invert = T),]
+file1<-paste0("HERV_hiconf_table_mbendall_",samp,".txt")
+write.table(datos, file=file1, quote=F, sep='\t', row.names=F)
+
+lfile<-list.files(pattern='L1-telescope_report.tsv', recursive=T) #find all files with that name
+datatemp <- read_multiple(lfile, name="Gene", col=c(1,4)) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+datos<-datos[grep(datos$Gene,pattern = "__no_feature",invert = T),]
+file1<-paste0("L1_hiconf_table_mbendall_",samp,".txt")
+write.table(datos, file=file1, quote=F, sep='\t', row.names=F)

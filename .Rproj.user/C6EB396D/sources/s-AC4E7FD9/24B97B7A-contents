@@ -1,0 +1,90 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Gislaine FFPE
+
+This notebook is for the analyzes of FFPE breast samples. 
+
+Data:
+
+Reading Gene Tables:
+```{r}
+read_multiple<-function(x, name, col){
+  lapply(lfile, function(x) {
+    z <-read.delim(x,header=T,skip=0)[,col]
+    colnames(z)<-c(name,strsplit(strsplit(x,split="/")[[1]][9],split="_htseq",fixed=T)[[1]][1])
+    z
+  })}   #this function is for reading multiple files
+
+lfile<-list.files(path = "/Users/luis_iniguez/Documents/WCM/FFPE_Brazil/",pattern='*_htseq.txt', recursive=T) #find all files with that name
+lfile<-paste0("/Users/luis_iniguez/Documents/WCM/FFPE_Brazil/",lfile)
+datatemp <- read_multiple(lfile, name="Gene", col=c(1,2)) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+datos<-datos[-grep(datos$Gene, pattern="__"),]
+file1<-paste0("Gene_table_Gislaine.txt")
+write.table(datos, file=file1, quote=F, sep='\t', row.names=F)
+```
+
+
+Reading Telescope Tables:
+```{r}
+read_multiple<-function(x, name, col){
+  lapply(lfile, function(x) {
+    z <-read.delim(x,header=T,skip=1)[,col]
+    colnames(z)<-c(name,strsplit(x,split="/")[[1]][9])
+    z
+  })}   #this function is for reading multiple files
+
+
+lfile<-list.files(path = "/Users/luis_iniguez/Documents/WCM/FFPE_Brazil/",pattern='*_report.tsv', recursive=T) #find all files with that name
+lfile<-paste0("/Users/luis_iniguez/Documents/WCM/FFPE_Brazil/",lfile)
+datatemp <- read_multiple(lfile, name="Gene", col=c(1,4)) # Read the file and extract the column 3 is for final_count and 4 the final_conf
+datos<-Reduce(function(x,y) {merge(x,y, by="Gene", all=T)}, datatemp) #merge all tables into a single one
+datos[is.na(datos)]<-0
+datos<-datos[-grep(datos$Gene, pattern="__"),]
+file1<-paste0("HERV_table_Gislaine.txt")
+write.table(datos, file=file1, quote=F, sep='\t', row.names=F)
+```
+
+Reading and filtering results
+```{r}
+library(DESeq2)
+
+cts_g<-read.delim("Gene_table_Gislaine.txt",row.names = 1)
+cts_h<-read.delim("HERV_table_Gislaine.txt",row.names = 1)
+
+identical(colnames(cts_g),colnames(cts_h))
+cts_h<-cts_h[,colnames(cts_g)]
+identical(colnames(cts_g),colnames(cts_h))
+
+coldata<- read.delim("Sample_Annotation.txt",row.names = 1,stringsAsFactors = T)
+rownames(coldata)<-gsub(rownames(coldata),pattern = "-",replacement = ".")
+rownames(coldata)<-c(paste0("X",grep(rownames(coldata),pattern="^[0-9]", value=T)),grep(rownames(coldata),pattern="^[0-9]", value=T,invert=T))
+
+identical(rownames(coldata), colnames(cts_h))
+coldata<-coldata[colnames(cts_h),]
+identical(rownames(coldata), colnames(cts_h))
+
+coldata$Group<-factor(paste(coldata$Tissue,coldata$HIV, sep = "_"))
+coldata$Run<-as.factor(coldata$Run)
+
+hist(rowSums(cts_g),breaks = 100)
+cts_g<-cts_g[rowSums(cts_g)>0,]
+
+boxplot(cts_g)
+
+
+```
+
+Deseq2 input
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = rbind(cts_g, cts_h),
+                              colData = coldata,
+                              design= ~Group+Run )
+
+
+```

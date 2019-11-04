@@ -1,0 +1,24 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1572889472879.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "12|6|28|0|\n32|6|49|0|\n",
+    "hash" : "1496763507",
+    "id" : "24B97B7A",
+    "lastKnownWriteTime" : 1572896962,
+    "last_content_update" : 1572896962490,
+    "path" : "~/Documents/WCM/FFPE_Brazil/FFPE_gislaine/FFPE_Gislaine.Rmd",
+    "project_path" : "FFPE_Gislaine.Rmd",
+    "properties" : {
+        "chunk_output_type" : "inline",
+        "cursorPosition" : "87,0",
+        "scrollLine" : "70",
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}
