@@ -1,0 +1,1634 @@
+---
+title: "Brad Jones RNA-seq"
+author: "Luis P Iniguez"
+date: "21/7/2019"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+#Background
+
+The aim of the assay was to identify genes where differential expression is associated to resistance vs susceptibility to CTL killing - using primary HIV-infected CD4 cells as targets.
+
+![Experiment](Image_1.png){ width=75% height=75% }
+
+5 different samples:
+
+| Name | Treatment | Gag |
+|:---------------------:|:---------:|:----------:|
+| Real Bystanders | CTL | Negative |
+| Real Survivors | CTL | Positive |
+| Mock Bystanders | Mock | Negative |
+| Mock Survivors | Mock | Positive |
+| Completely Uninfected | CTL | Uninfected |
+
+Two different experiments were performed with same samples groups (1-10 and 11-20)
+
+#Methods
+
+All the samples were analyzed with the same methodology independently of each other. The method consists of a filtering, trimming and cleaning reads with [flexbar](https://github.com/seqan/flexbar/wiki/Manual) (adapter removal, minimum length = 25, minimum mean quality=25). Filtered reads were mapped with [STAR](https://github.com/alexdobin/STAR) to hg38 and [htseq-count](https://htseq.readthedocs.io/en/release_0.11.1/index.html) was used for gene read count to the [Gencode version 31](https://www.gencodegenes.org/human/) assignment (unique reads only). These mappings were used for circRNA identification as input for [CIRCexplorer2](https://circexplorer2.readthedocs.io/en/latest/) and the downstream circRNA quantification with [CLEAR](https://github.com/YangLab/CLEAR). Additionally, filtered reads were mapped with [bowtie2](http://bowtie-bio.sourceforge.net/bowtie2/index.shtml) (--score-min L,0,1.6 -k 100) to hg38 for [HERV and L1](https://github.com/mlbendall/telescope_annotation_db) quantification. [Telescope](https://github.com/mlbendall/telescope) was used for repetitive element quantification. HIV gene and splicing sites quantification were calculated based on [hisat2](https://ccb.jhu.edu/software/hisat2/index.shtml) mappings to [K03455.1](https://www.ncbi.nlm.nih.gov/nuccore/K03455.1/).
+
+All features (genes, HERV, L1, HIV genes, circRNA, HIV splicing sites) were filtered based on low counts with edgeR and Deseq2 was used for differentially expression calculation. Clustering of differentially expressed features were calculated based on the hierarchical clustering (euclidean distance and ward.D2 method ((Murtagh and Legendre 2014)) of gene expression pattern transformed to z-scores. HERV and L1 enrichment analysis were calculated with fisher exact test. Gene ontology enrichment for each cluster was calculated with the topGO R package, classical algorithm in addition to the weighted algorithms (weight101) were used.
+
+**Important**: HIV splicing sites could be functional (for example D1-A2, D1-A3, etc.) or could be part of a defective HIV provirus expressed (for example solo LTR).  
+
+#### Data not included in this report
+
+Filtered reads were also aligned with hisat2 and stringtie for hots transcript and splicing quantification. SUPPA was used for alternative splicing events identification and quantification. Further analysis need to be done to include this data. 
+
+#Results
+
+```{r setup, include=T, message=FALSE,echo=F, cache=F,warning=FALSE}
+library("DESeq2") #si
+library("pheatmap") #si
+library("ggplot2") #si
+library("IHW") #si
+library('viridis')
+library("cowplot") #si
+library('knitr')
+library('kableExtra')
+library("RColorBrewer")
+library("ggsignif")
+library("UpSetR") #si
+library("apeglm")
+library("EnhancedVolcano") #si
+library("edgeR")
+library("VennDetail")
+library("reshape2")
+library("FNN")
+library("igraph")
+library("Rtsne")
+library("GenomicRanges")
+library("GenomicFeatures")
+library("rtracklayer")
+library("GOexpress")
+library("topGO")
+library("WGCNA")
+library("clusterProfiler")
+library("ape")
+library("GO.db")
+library("tm")
+library("ggwordcloud")
+library("ReactomePA")
+library("rmarkdown")
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("ape")
+library("ggtree")
+
+
+
+plotPCA_LPI<-function(x,titel="PCA"){
+  ggplot(data=x)+
+  geom_point(aes(x=PC1,y=PC2,colour=HIV, shape=CTL),size=2)+
+  labs(colour="Gag",shape="Treatment")+ 
+  scale_color_manual(values=c("black","red","green"))+
+  scale_shape_discrete(labels=c("CTL", "Mock"))+
+  ggtitle(titel)+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+}
+scale_rows = function(x){
+    m = apply(x, 1, mean, na.rm = T)
+    s = apply(x, 1, sd, na.rm = T)
+    return((x - m) / s)
+}
+firstup <- function(x) {
+  substr(x, 1, 1) <- toupper(substr(x, 1, 1))
+  x
+}
+
+
+setwd("~/Documents/WCM/Dughan/Bjones03092019/")
+tr2gn<-read.table("transcript2gene_gencode.v31.txt", col.names = c("Transcript","Gene"), row.names = "Transcript")
+herv_counts<-read.table("HERVs_family_counts.txt",row.names=1,col.names=c("HERV","Counts","Group"))
+# all_genes<-read.table("gencode.v31.metadata.Gene_source", row.names=1)
+# all_genes<-unique(sapply(strsplit(as.character(rownames(all_genes)),split='.',fixed=T),'[[',1))
+
+GOS<-readMappings(file="GO_annotations_mappings_2.txt", sep = "\t", IDsep = ",")
+
+annotation <- read.table("cuffcompare_Str_STAR.tracking",
+                               col.names = c("Transcript","Gene","Reference","Class","END"))[,1:4]
+annotation$RefTranscript<-sapply(strsplit(as.character(annotation$Reference),
+                                                split = "|", fixed = T),`[`,2)
+annotation$RefGen<-tr2gn[annotation$RefTranscript,]
+
+# cts_g <- as.matrix(read.csv("Stringtie_STAR_geneCount.txt",row.names = 1))
+# tempdata<-unique(annotation[annotation$Gene %in% rownames(cts_g),c("Gene","RefGen")])
+# tempdata<-tempdata[!is.na(tempdata$RefGen),]
+# tempdata$RefGen<-sapply(strsplit(as.character(tempdata$RefGen),split=".",fixed=T),'[[',1)
+# new_cts_g<-t(sapply(unique(tempdata$RefGen),function(x, ann=tempdata, cts=cts_g){
+#   idx<-grep(pattern=x,ann$RefGen)
+#   if(length(idx)>1){
+#     colSums(cts_g[ann[grep(pattern=x,ann$RefGen),"Gene"],])
+#   }else{
+#     cts_g[ann[grep(pattern=x,ann$RefGen),"Gene"],]
+#   }
+# }))
+# write.table(new_cts_g,file="Stringtie_STAR_geneCount_mod.txt",sep=',',quote = F)
+
+# ensemble_ann<-read.delim("ensemble_annotations_biomart_071019.tsv",na.strings = "")
+# go_endisemble<-unique(ensemble_ann[!is.na(ensemble_ann$GO.term.accession),c("Gene.stable.ID","GO.term.accession")])
+# go_endisemble2<-sapply(as.character(unique(go_endisemble$Gene.stable.ID)),function(x,table=go_endisemble){
+#     paste(as.character(table$GO.term.accession[which(table$Gene.stable.ID == x)]),collapse = ",")
+# })
+# write.table(go_endisemble2,file="GO_annotations_mappings.txt",sep="\t",quote=F,col.names = F,row.names = T)
+
+ann_colors <- list(Treatment = c(CTL="tomato", Mock="turquoise"),
+                  Gag = c(Negative = "blue", Positive = "red", Uninfected="green"),
+                  Type= c(CircRNA="blue", Gene="black",HERV="magenta", HIV="red",HIV_SS="yellow",L1="cyan"))
+```
+
+```{r read,echo=F, message=FALSE, include=T, cache=F,warning=FALSE}
+cts_g <- as.matrix(read.delim("Bjones_Gencode.v31.tsv", row.names = 1,sep=','))
+cts_t <- as.matrix(read.csv("Stringtie_STAR_transcriptCount.txt",row.names = 1))
+cts_c <- as.matrix(read.delim("circRNA_readcount.txt",row.names = 1))
+ratio_c <- as.matrix(read.delim("circRNA_relativeexpression.txt",row.names = 1))
+cts_h <- as.matrix(read.delim("Bjones_HERV_table.tsv",row.names = 1,sep=','))
+cts_l <- as.matrix(read.delim("Bjones_L1_table.tsv",row.names = 1,sep=','))
+cts_hiv <- as.matrix(read.delim("BjonesHIV_Gene_table.tsv",row.names = 1,sep=','))
+cts_hiv_alljunctions<- as.matrix(read.delim("BjonesHIV_junctionCount.tsv",row.names = 1,sep=','))
+cts_hiv_SS<- as.matrix(read.delim("Bjones_SS_table.tsv",row.names = 1,sep=','))
+
+
+sizes_g <- as.matrix(read.delim("gene_length_Gencode.v31.txt", row.names = 1,sep='\t'))
+sizes_c <- matrix(ncol=length(colnames(sizes_g)), nrow = length(rownames(cts_c)),
+                  rep(101,length(colnames(sizes_g))*length(rownames(cts_c))))
+colnames(sizes_c)<-colnames(sizes_g);rownames(sizes_c)<-rownames(cts_c)
+
+sizes_h <- as.matrix(read.delim("gene_length_HERV.txt",row.names = 1,sep='\t'))
+sizes_l <- as.matrix(read.delim("gene_length_L1.txt",row.names = 1,sep='\t'))
+sizes_hiv <- as.matrix(read.delim("gene_length_HIV.txt",row.names = 1,sep='\t'))
+sizes_hiv_alljunctions <- matrix(ncol=length(colnames(sizes_g)), nrow = length(rownames(cts_hiv_alljunctions)),
+                  rep(101,length(colnames(sizes_g))*length(rownames(cts_hiv_alljunctions))))
+colnames(sizes_hiv_alljunctions)<-colnames(sizes_g);rownames(sizes_hiv_alljunctions)<-rownames(cts_hiv_alljunctions)
+
+sizes_g<-sizes_g[rownames(sizes_g) %in% rownames(cts_g),]
+sizes_h<-sizes_h[rownames(sizes_h) %in% rownames(cts_h),]
+sizes_l<-sizes_l[rownames(sizes_l) %in% rownames(cts_l),]
+
+
+circ_annotation <- read.table("circRNA_annotation_Bjones.txt",
+                                    col.names=c("Chromosome","Start","End","Exons","Type","Gene","Flanking_Introns"))
+circ_annotation$Name<-paste0(circ_annotation$Chromosome,":",
+                                   circ_annotation$Start,"-",circ_annotation$End)
+
+circ_genes<-unique(annotation$Gene[annotation$GeneHasCircRNA])
+coldata <- read.delim("sample_annotation.txt", row.names=1)
+coldata$Groupmod<-gsub(" ", "_", coldata$Group)
+coldata$Groupmod<-factor(coldata$Groupmod)
+
+annotation$GeneHasCircRNA<-annotation$RefGen %in% circ_annotation$Gene
+
+chro<-sapply(strsplit(rownames(cts_hiv_alljunctions),split=":"),'[[',1)
+a<-as.numeric(sapply(strsplit(sapply(strsplit(rownames(cts_hiv_alljunctions),split=":"),'[[',2),split="-"),'[[',1))
+a_ini<- a-10
+b<-as.numeric(sapply(strsplit(sapply(strsplit(rownames(cts_hiv_alljunctions),split=":"),'[[',2),split="-"),'[[',2))
+b_fin<-b+10
+ss_names<-rownames(cts_hiv_alljunctions)
+ss_gr_a<- GRanges(seqnames = chro,
+    ranges = IRanges(a_ini, end = a, names = ss_names),strand = '+')
+ss_gr_b<- GRanges(seqnames = chro,
+    ranges = IRanges(b, end = b_fin, names = ss_names),strand = '+')
+
+gr <- import("LTR_HIV.gff3")
+
+notLTR_a<-subsetByOverlaps(ss_gr_a, gr, invert = FALSE, ignore.strand = TRUE)
+notLTR_b<-subsetByOverlaps(ss_gr_b, gr, invert = FALSE, ignore.strand = TRUE)
+
+LTR_i<-sort(unique(end(notLTR_a)))
+LTR_i<-cbind(LTR_i,paste0("LTR",1:length(LTR_i)))
+LTR_d<-sort(unique(start(notLTR_b)))
+LTR_d<-cbind(LTR_d,paste0("LTR",1:length(LTR_d)))
+
+transSS<-read.delim("HIV_SS_positions.txt")
+for( i in 1:length(transSS[,1])){
+  w<-as.factor(transSS[i,1])
+  t<-transSS[i,2]
+  rownames(cts_hiv_alljunctions)<-gsub(w,t,rownames(cts_hiv_alljunctions))
+}
+for( i in 1:length(LTR_i[,1])){
+  w<-as.factor(paste0(":",LTR_i[i,1],"-"))
+  t<-paste0(":",LTR_i[i,2],"-")
+  rownames(cts_hiv_alljunctions)<-gsub(w,t,rownames(cts_hiv_alljunctions),fixed = T)
+}
+for( i in 1:length(LTR_d[,1])){
+  w<-as.factor(paste0("-",LTR_d[i,1],"$"))
+  t<-paste0("-",LTR_d[i,2])
+  rownames(cts_hiv_alljunctions)<-gsub(w,t,rownames(cts_hiv_alljunctions), perl = T)
+}
+
+```
+
+```{r transformcountsExp,echo=F, message=FALSE, include=T, cache=F,warning=FALSE}
+all <- rbind(cts_g[,colnames(cts_g)], cts_c[,colnames(cts_g)],cts_h[,colnames(cts_g)], cts_l[,colnames(cts_g)],cts_hiv[,colnames(cts_g)], cts_hiv_alljunctions[,colnames(cts_g)])
+size_all<-rbind(sizes_g, sizes_c, sizes_h,sizes_l,sizes_hiv,sizes_hiv_alljunctions)
+subset<-rownames(coldata)[coldata$Experiment == 1 ]
+all_1<-all[,subset]
+group_1<- coldata[subset,"Group"]
+subset<-rownames(coldata)[!(coldata$Experiment == 1) ]
+all_2<-all[,subset]
+group_2<- coldata[subset,"Group"]
+
+y_1 <- DGEList(counts=all_1,group=group_1)
+y_2 <- DGEList(counts=all_2,group=group_2)
+design_1 <- model.matrix(~0+group_1,data = y_1$samples)
+design_2 <- model.matrix(~0+group_2,data = y_2$samples)
+keep_1 <- filterByExpr(y_1,design=design_1)
+keep_2 <- filterByExpr(y_2,design=design_2)
+keep_1[rownames(cts_c)]<-TRUE
+keep_2[rownames(cts_c)]<-TRUE
+y_1 <- y_1[keep_1, ,keep.lib.sizes=FALSE]
+size_all_1<-size_all[keep_1,]
+y_2 <- y_2[keep_2, ,keep.lib.sizes=FALSE]
+size_all_2<-size_all[keep_2,]
+y_1 <- calcNormFactors(y_1)
+y_2 <- calcNormFactors(y_2)
+y_1 <- estimateDisp(y_1,design_1)
+y_2 <- estimateDisp(y_2,design_2)
+fit_1 <- glmFit(y_1,design_1)
+fit_2 <- glmFit(y_2,design_2)
+
+
+rpkm_1<-rpkm(y_1,gene.length = size_all_1[,3])
+rpkm_2<-rpkm(y_2,gene.length = size_all_2[,3])
+
+dds_LPI_1 <- DESeqDataSetFromMatrix(countData = y_1$counts,
+                                  colData = coldata[colnames(y_1$counts),],design =~ Groupmod)
+dds_LPI_2 <- DESeqDataSetFromMatrix(countData = y_2$counts,
+                                  colData = coldata[colnames(y_2$counts),],design =~ Groupmod)
+dds_LPI_LTR_1 <- DESeq(dds_LPI_1, test="LRT", reduced=~1)
+dds_LPI_LTR_2 <- DESeq(dds_LPI_2, test="LRT", reduced=~1)
+rld_LPI_1 <- rlog(dds_LPI_1, blind=FALSE)
+rld_LPI_2 <- rlog(dds_LPI_2, blind=FALSE)
+
+expressed_genes_1<-rownames(rld_LPI_1)
+universe_1<-bitr(unique(sapply(strsplit(expressed_genes_1,split = ".",fixed=T),'[[',1)),fromType = "ENSEMBL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Hs.eg.db)$ENTREZID
+expressed_genes_2<-rownames(rld_LPI_2)
+universe_2<-bitr(unique(sapply(strsplit(expressed_genes_2,split = ".",fixed=T),'[[',1)),fromType = "ENSEMBL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Hs.eg.db)$ENTREZID
+```
+
+```{r Results_DE,echo=F, message=FALSE, include=T, cache=F, fig.height=6, fig.width=12}
+res_1<-results(dds_LPI_LTR_1,alpha = 0.00001)
+res_1_filt <- res_1[res_1$padj<0.00001 & !is.na(res_1$padj),]
+
+res_2<-results(dds_LPI_LTR_2,alpha = 0.00001)
+res_2_filt <- res_2[res_2$padj<0.00001 & !is.na(res_2$padj),]
+```
+
+##PCA
+
+###Everything
+
+Principal component analyses of all features together showed samples group together by condition. PC1 identifies Gag positive samples on both set of samples, while PC2 on the first set (1-10) stands for the treatment and on the second data set (11-20) it is not that clear. 
+
+
+```{r PCA_all,echo=F, message=FALSE, include=T, cache=F, fig.height=3, fig.width=8}
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+
+set1<-plotPCA_LPI(ploting_PCA_LPI,titel="Everything (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+
+set2<-plotPCA_LPI(ploting_PCA_LPI,titel="Everything (11-20)")
+
+plot_grid(ncol=2,plotlist = list(set1,set2))
+```
+
+###Each feature
+
+My next question was if the PCA of everything together stands for every feature identified in this study. 
+
+```{r PCA_each,echo=F, message=FALSE, include=T, cache=F, fig.height=9, fig.width=8}
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[rownames(assay(rld_LPI_1)) %in% rownames(cts_g),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+genes_1<-plotPCA_LPI(ploting_PCA_LPI,titel="Genes (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[rownames(assay(rld_LPI_2)) %in% rownames(cts_g),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+genes_2<-plotPCA_LPI(ploting_PCA_LPI,titel="Genes (11-20)")
+
+
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[circ_annotation$Name,]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+circ_1<-plotPCA_LPI(ploting_PCA_LPI,titel="circRNA  (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[circ_annotation$Name,]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+circ_2<-plotPCA_LPI(ploting_PCA_LPI,titel="circRNA  (11-20)")
+
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[rownames(assay(rld_LPI_1)) %in% rownames(cts_h),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HERV_1<-plotPCA_LPI(ploting_PCA_LPI,titel="HERV (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[rownames(assay(rld_LPI_2)) %in% rownames(cts_h),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HERV_2<-plotPCA_LPI(ploting_PCA_LPI,titel="HERV (11-20)")
+
+
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[rownames(assay(rld_LPI_1)) %in% rownames(cts_l),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+L1_1<-plotPCA_LPI(ploting_PCA_LPI,titel="L1 (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[rownames(assay(rld_LPI_2)) %in% rownames(cts_l),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+L1_2<-plotPCA_LPI(ploting_PCA_LPI,titel="L1 (11-20)")
+
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[rownames(assay(rld_LPI_1)) %in% rownames(cts_hiv),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HIV_1<-plotPCA_LPI(ploting_PCA_LPI,titel="HIV Genes (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[rownames(assay(rld_LPI_2)) %in% rownames(cts_hiv),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HIV_2<-plotPCA_LPI(ploting_PCA_LPI,titel="HIV Genes (11-20)")
+
+PCA_LPI <- prcomp(t(assay(rld_LPI_1)[rownames(assay(rld_LPI_1)) %in% rownames(cts_hiv_alljunctions),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HIV_SS_1<-plotPCA_LPI(ploting_PCA_LPI,titel="HIV SplicingSites (1-10)")
+PCA_LPI <- prcomp(t(assay(rld_LPI_2)[rownames(assay(rld_LPI_2)) %in% rownames(cts_hiv_alljunctions),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],HIV=coldata[rownames(PCA_LPI$x),"Gag"],
+                            CTL=factor(coldata[rownames(PCA_LPI$x),"Treatment"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+HIV_SS_2<-plotPCA_LPI(ploting_PCA_LPI,titel="HIV SplicingSites (11-20)")
+
+
+
+plot_grid(ncol=2,plotlist = list(genes_1,genes_2,circ_1,circ_2,HERV_1,HERV_2))
+plot_grid(ncol=2,plotlist = list(L1_1,L1_2,HIV_1,HIV_2,HIV_SS_1,HIV_SS_2))
+```
+
+Interestingly the PCA on expressed HERVs and L1 showed a similar pattern as the expressed genes but circRNAs followed a different pattern. HIV genes closed the gap between Gag negative samples in set1 while in set2 increases the distances, nevertheless those samples still differ from the uninfected ones. The PCA of HIV splicing sites could not distinguish gag negative and are closer to the uninfected samples. Set1 positive samples in the PCA of HIV splicing sites are mixed while in the set2 are separately. 
+
+###Conclusion
+
+Samples cluster with similar samples, regarding the data sets, on genes, HERV, L1 and HIV-Genes. This validates the experimental conditions. circRNAs do not seem to cluster similar samples. PC1 segregates Gag positive samples and could be interpreted as infection since uninfected samples are on the left side of the plot, for both data sets. PC2, on set1, segregates CTL treatment, since all CTL treated are on the bottom of the graph. For the interpretation of PC2 on set2 needs further understanding of the experiments.  
+
+##HERV family enrichment
+
+HERV annotation plus HERV expression enables us to identify families enriched or depleted in the collection of expressed features. (universe=all HERV annotated)
+
+### _Set1 (1-10)_
+
+| Enriched | Diminished |
+
+```{r HERV_enrdim_1,echo=F, message=FALSE, include=T, cache=F,results='asis',paged.print=F}
+total<-sum(herv_counts[,1])
+list_hervs_exrp_1<-rownames(rld_LPI_1)[rownames(rld_LPI_1) %in% rownames(cts_h)]
+hervs_expr_1<-as.data.frame(table(sapply(strsplit(list_hervs_exrp_1,split="_"),'[[',1)),row.names = 1)
+total_expr_1<-sum(hervs_expr_1[,1])
+enriched_1<-data.frame(row.names=rownames(hervs_expr_1),
+                     pvalue=rep(1,length(rownames(hervs_expr_1))),FDR=rep(1,length(rownames(hervs_expr_1))))
+reduced_1<-data.frame(row.names =rownames(hervs_expr_1),
+                    pvalue=rep(1,length(rownames(hervs_expr_1))),FDR=rep(1,length(rownames(hervs_expr_1))))
+for(i in rownames(hervs_expr_1)){
+  not_f<-total_expr_1-hervs_expr_1[i,]
+  not_f_t<-herv_counts[i,1]-hervs_expr_1[i,]
+  not_not_f<-total-not_f-not_f_t-hervs_expr_1[i,]
+  enriched_1[i,"pvalue"]<-fisher.test(matrix(c(hervs_expr_1[i,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),alternative = "g")$p.value
+  reduced_1[i,"pvalue"]<-fisher.test(matrix(c(hervs_expr_1[i,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),alternative = "l")$p.value
+}
+enriched_1$FDR<-p.adjust(enriched_1[,1],method = "fdr")
+reduced_1$FDR<-p.adjust(reduced_1[,1],method = "fdr")
+out_1a<-cbind(Family=rownames(enriched_1)[enriched_1$FDR<0.05],
+              Group=as.character(herv_counts[rownames(enriched_1)[enriched_1$FDR<0.05],"Group"]))
+out_1b<-cbind(Family=rownames(reduced_1)[reduced_1$FDR<0.05],
+              Group=as.character(herv_counts[rownames(reduced_1)[reduced_1$FDR<0.05],"Group"]))
+kable(list("Enriched"=out_1a,"Diminished"=out_1b), format="pandoc")
+
+```
+
+### _Set2 (11-20)_
+
+| Enriched | Diminished |
+
+```{r HERV_enrdim_2,echo=F, message=FALSE, include=T, cache=F,results='asis' ,paged.print=F}
+list_hervs_exrp_2<-rownames(rld_LPI_2)[rownames(rld_LPI_2) %in% rownames(cts_h)]
+hervs_expr_2<-as.data.frame(table(sapply(strsplit(list_hervs_exrp_2,split="_"),'[[',1)),row.names = 1)
+total_expr_2<-sum(hervs_expr_2[,1])
+enriched_2<-data.frame(row.names=rownames(hervs_expr_2),
+                     pvalue=rep(1,length(rownames(hervs_expr_2))),FDR=rep(1,length(rownames(hervs_expr_2))))
+reduced_2<-data.frame(row.names =rownames(hervs_expr_2),
+                    pvalue=rep(1,length(rownames(hervs_expr_2))),FDR=rep(1,length(rownames(hervs_expr_2))))
+for(i in rownames(hervs_expr_2)){
+  not_f<-total_expr_2-hervs_expr_2[i,]
+  not_f_t<-herv_counts[i,1]-hervs_expr_2[i,]
+  not_not_f<-total-not_f-not_f_t-hervs_expr_2[i,]
+  enriched_2[i,"pvalue"]<-fisher.test(matrix(c(hervs_expr_2[i,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),alternative = "g")$p.value
+  reduced_2[i,"pvalue"]<-fisher.test(matrix(c(hervs_expr_2[i,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),alternative = "l")$p.value
+}
+enriched_2$FDR<-p.adjust(enriched_2[,1],method = "fdr")
+reduced_2$FDR<-p.adjust(reduced_2[,1],method = "fdr")
+out_2a<-cbind(Family=rownames(enriched_2)[enriched_2$FDR<0.05],
+              Group=as.character(herv_counts[rownames(enriched_2)[enriched_2$FDR<0.05],"Group"]))
+out_2b<-cbind(Family=rownames(reduced_2)[reduced_2$FDR<0.05],
+              Group=as.character(herv_counts[rownames(reduced_2)[reduced_2$FDR<0.05],"Group"]))
+kable(list("Enriched"=out_2a,"Diminished"=out_2b), format="pandoc") 
+```
+
+The two sets presented the same diminished families, while the some of the enriched families are specific to set. 
+
+### _Unique HERV expression family enrichment_
+
+| Family | Group | Set |
+|:----------:|:-----:|:----:|
+| HERVIP10FH | HERVI | Set1 |
+| HML2 | HERVI | Set1 |
+| HERVE | HERVE | Set2 |
+| HERVH48 | HERVH | Set2 |
+| HML5 | HERVK | Set2 |
+
+###Conclusion
+
+The statistical significance of the diminished HERVs families are in concordance on both data set. This is interesting and further research to address this point needs to be performed. Regarding the enrichment analysis, most of the HERVs families enriched are shared on both sets, the specific HERV families enriched for each cluster are also interesting and further research on this subject need to be done. 
+
+
+##HIV gene expression
+
+The panel on the left shows the expression of HIV genes of set1 while the one on the right shows the expression of set1 HIV genes. The heatmap represents the z-score of the normalized values of HIV genes, while the lines plots represent the actual normalized count (standardized by gene length) value for each gene (each line) in all conditions (similar order as the heatmap)(dist='euclidean', method='complete' for the hierarchical clustering). 
+
+```{R HIV_Expr,echo=F, message=FALSE, include=T, cache=F, fig.height=6, fig.width=12}
+HIVheat_1<-pheatmap(assay(rld_LPI_1)[rownames(cts_hiv),], cluster_rows=TRUE, show_rownames=TRUE,
+                    annotation_colors = ann_colors,border_color = NA,cluster_cols=TRUE,main = "1-10",
+                    annotation_col=coldata[colnames(y_1$counts),c("Gag","Treatment")],scale = "row",silent = T)[[4]]
+HIVheat_2<-pheatmap(assay(rld_LPI_2)[rownames(cts_hiv),], cluster_rows=TRUE, show_rownames=TRUE,
+                    annotation_colors = ann_colors,border_color = NA,cluster_cols=TRUE,main = "11-20",
+                    annotation_col=coldata[colnames(y_2$counts),c("Gag","Treatment")],scale = "row",silent = T)[[4]]
+
+hiv_expression<-melt(rpkm_1[rownames(cts_hiv),])
+hiv_expression$Var2<-factor(hiv_expression$Var2,levels=c("X4","X6","X10","X8","X1","X2","X3","X5","X7","X9"))
+HIVline_1<-ggplot(hiv_expression,aes(x=Var2,y=value,group=Var1))+
+  geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 0, ymax = 0, fill = 'Treatment'), alpha = .2)+
+  geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 0, ymax = 0, fill = 'Gag'), alpha = .2)+
+  geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 9500, ymax = 9800, fill = 'Uninfected'), alpha = .2)+
+  geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 10000, ymax = 10300, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X7',xmax = 'X9',ymin = 9500, ymax = 9800, fill = 'Negative'), alpha = .2)+
+  geom_rect(aes(xmin = 'X7',xmax = 'X9',ymin = 10000, ymax = 10300, fill = 'Mock'), alpha = .2)+
+  geom_rect(aes(xmin = 'X10',xmax = 'X8',ymin = 9500, ymax = 9800, fill = 'Positive'))+
+  geom_rect(aes(xmin = 'X10',xmax = 'X8',ymin = 10000, ymax = 10300, fill = 'Mock'))+
+  geom_rect(aes(xmin = 'X3',xmax = 'X5',ymin = 9500, ymax = 9800, fill = 'Negative'), alpha = .2)+
+  geom_rect(aes(xmin = 'X3',xmax = 'X5',ymin = 10000, ymax = 10300, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X4',xmax = 'X6',ymin = 9500, ymax = 9800, fill = 'Positive'))+
+  geom_rect(aes(xmin = 'X4',xmax = 'X6',ymin = 10000, ymax = 10300, fill = 'CTL'))+
+  geom_line(aes(color=Var1),lwd=1.5)+
+  ylim(c(0,10500))+xlab("")+ylab("RPKM")+
+  scale_fill_manual(breaks=c("Treatment",names(ann_colors$Treatment),"Gag",names(ann_colors$Gag)),
+                    values=c(Treatment="white",ann_colors$Treatment,Gag="white",ann_colors$Gag),drop=FALSE)+
+  scale_color_brewer(palette="Set1")+
+  labs(fill = "", color="Gene")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+hiv_expression<-melt(rpkm_2[rownames(cts_hiv),])
+hiv_expression$Var2<-factor(hiv_expression$Var2,levels=c("X14","X16","X18","X20","X17","X19","X13","X15","X11","X12"))
+HIVline_2<-ggplot(hiv_expression,aes(x=Var2,y=value,group=Var1))+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 0, ymax = 0, fill = 'Treatment'), alpha = .2)+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 0, ymax = 0, fill = 'Gag'), alpha = .2)+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 8800, ymax = 9100, fill = 'Positive'), alpha = .2)+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 9200, ymax = 9500, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 8800, ymax = 9100, fill = 'Positive'), alpha = .2)+
+  geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 9200, ymax = 9500, fill = 'Mock'), alpha = .2)+
+  geom_rect(aes(xmin = 'X17',xmax = 'X19',ymin = 8800, ymax = 9100, fill = 'Negative'))+
+  geom_rect(aes(xmin = 'X17',xmax = 'X19',ymin = 9200, ymax = 9500, fill = 'Mock'))+
+  geom_rect(aes(xmin = 'X13',xmax = 'X15',ymin = 8800, ymax = 9100, fill = 'Negative'), alpha = .2)+
+  geom_rect(aes(xmin = 'X13',xmax = 'X15',ymin = 9200, ymax = 9500, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X11',xmax = 'X12',ymin = 8800, ymax = 9100, fill = 'Uninfected'))+
+  geom_rect(aes(xmin = 'X11',xmax = 'X12',ymin = 9200, ymax = 9500, fill = 'CTL'))+
+  geom_line(aes(color=Var1),lwd=1.5)+
+   ylim(c(0,9700))+xlab("")+ylab("RPKM")+
+  scale_fill_manual(breaks=c("Treatment",names(ann_colors$Treatment),"Gag",names(ann_colors$Gag)),
+                    values=c(Treatment="white",ann_colors$Treatment,Gag="white",ann_colors$Gag),drop=FALSE)+  
+  scale_color_brewer(palette="Set1")+
+  labs(fill = "", color="Gene")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+
+plot_grid(ncol=2,plotlist = list(HIVheat_1,HIVheat_2,HIVline_1,HIVline_2))
+
+```
+
+###Conclusions
+
+The results presented here lead to different conclusions:
+
+- HIV genes are in fact more expressed in the Gag positive samples
+- The sample clustering differs on both sets (might be because of the experiment)
+    * Set1 groups each experiment condition while set2 groups gag negative and uninfected conditions but gag positives are mixed. 
+    *On set1 the uninfected samples are an outgroup from the gag negative ones, while on set2 uninfected samples cluster together with the gag negative CTL treated samples. 
+
+##Differentiall Expression
+
+###Numbers
+Since the DE between samples (i.e Real Survivors vs Real Bystanders) was already calculated and analyzed I analyzed the DE in a different way. I used a likelihood ratio test for identify any features differentially expressed in any sample (p-value <0.00001).
+
+"*The likelihood ratio test is useful for testing multiple terms at once, for example testing 3 or more levels of a factor at once*" (in our case groups Real survivors, real bystanders, etc.)[...] "*The likelihood ratio test for count data is conceptually similar to an analysis of variance (ANOVA) calculation in linear regression, except that in the case of the Negative Binomial GLM, we use an analysis of deviance (ANODEV), where the deviance captures the difference in likelihood*" ([Deseq2](https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html))
+
+The heatmap of all DE features are plotted next for each set:
+
+```{r DE_heat,echo=F, message=FALSE, include=T, cache=F, fig.height=4, fig.width=8}
+DE_genExpression_1<-assay(rld_LPI_1)[rownames(res_1_filt),]
+DE_genExpression_2<-assay(rld_LPI_2)[rownames(res_2_filt),]
+
+rowannotation_1<-data.frame(row.names=rownames(DE_genExpression_1),Type=rep("Gene",dim(DE_genExpression_1)[1]),stringsAsFactors = F)
+rowannotation_1[which(rownames(rowannotation_1) %in% rownames(cts_c)),]<-"CircRNA"
+rowannotation_1[which(rownames(rowannotation_1) %in% rownames(cts_hiv)),]<-"HIV"
+rowannotation_1[which(rownames(rowannotation_1) %in% rownames(cts_h)),]<-"HERV"
+rowannotation_1[which(rownames(rowannotation_1) %in% rownames(cts_l)),]<-"L1"
+rowannotation_1[which(rownames(rowannotation_1) %in% rownames(cts_hiv_alljunctions)),]<-"HIV_SS"
+rowannotation_2<-data.frame(row.names=rownames(DE_genExpression_2),Type=rep("Gene",dim(DE_genExpression_2)[1]),stringsAsFactors = F)
+rowannotation_2[which(rownames(rowannotation_2) %in% rownames(cts_c)),]<-"CircRNA"
+rowannotation_2[which(rownames(rowannotation_2) %in% rownames(cts_hiv)),]<-"HIV"
+rowannotation_2[which(rownames(rowannotation_2) %in% rownames(cts_h)),]<-"HERV"
+rowannotation_2[which(rownames(rowannotation_2) %in% rownames(cts_l)),]<-"L1"
+rowannotation_2[which(rownames(rowannotation_2) %in% rownames(cts_hiv_alljunctions)),]<-"HIV_SS"
+
+heat_all_1_pp<-pheatmap(DE_genExpression_1,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,
+         cluster_cols=TRUE, scale = "row",
+         annotation_col=coldata[colnames(y_1$counts),c("Gag","Treatment")],
+         main="1-10",
+         color = viridis(30, direction = -1),annotation_colors = ann_colors,
+         clustering_method = "ward.D", silent=T)[[4]]
+heat_all_2_pp<-pheatmap(DE_genExpression_2,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,
+         cluster_cols=TRUE, scale = "row",main="11-20",
+         annotation_col=coldata[colnames(y_2$counts),c("Gag","Treatment")],
+         color = viridis(30, direction = -1),annotation_colors = ann_colors,
+         clustering_method = "ward.D", silent=T)[[4]]
+
+plot_grid(ncol=2,plotlist = list(heat_all_1_pp,heat_all_2_pp))
+
+```
+
+Sorting of the samples
+
+These tables showed the number of features DE for each set (set1 on the left, and set2 on the right):
+
+| 1-10 | 11-20 |
+
+
+```{r DE_table,echo=F, message=FALSE, include=T, cache=F,results='asis',paged.print=F}
+DE_1_10<-as.numeric(table(rowannotation_1))
+names(DE_1_10)<-names(table(rowannotation_1))
+DE_11_20<-as.numeric(table(rowannotation_2))
+names(DE_11_20)<-names(table(rowannotation_2))
+kable(list(DE_1_10,DE_11_20),format="pandoc",col.names = c("DE"))
+```
+
+####Conclusions
+
+HIV genes and splicing sites are differentially expressed, as expected, in both data sets. The most feature differentially expressed on the two data set are genes and set1 has more DE features than set2. The sample dendrogram lead also to different conclusions. Gag positives samples are a clustered different as the gag negative and uninfected samples on both data sets, as expected. Nevertheless, the uninfected gag negative samples differ, on set1 CTL treated samples are clustered together and the outgroup is the mock treated, while on set2 the outgroup are the uninfected samples. These differences between sets could be explained because of the different experiment conditions. 
+
+###Enrichment/Dimished in DE
+
+Are HERVs, L1, HIV genes or HIV splicing sites enriched or diminished in the DE features from each set? (universe=expressed HERVs/L1/HIV genes/HIV_SS)
+
+
+#### _Set1 (1-10)_
+
+  * Features:
+  
+```{r EnrichHERVL1_DE_1,echo=F, message=FALSE, include=T, cache=F}
+total<-length(rownames(rld_LPI_1))
+tot_g<-sum(rownames(rld_LPI_1) %in% rownames(cts_g))
+tot_c<-sum(rownames(rld_LPI_1) %in% rownames(cts_c))
+tot_h<-sum(rownames(rld_LPI_1) %in% rownames(cts_h))
+tot_l<-sum(rownames(rld_LPI_1) %in% rownames(cts_l))
+tot_hiv<-sum(rownames(rld_LPI_1) %in% rownames(cts_hiv))
+tot_hiv_SS<-sum(rownames(rld_LPI_1) %in% rownames(cts_hiv_alljunctions))
+temp<-as.matrix(DE_genExpression_1)
+temp_tot<-dim(temp)[1]
+temp_g<-sum(rownames(temp) %in% rownames(cts_g))
+temp_c<-sum(rownames(temp) %in% rownames(cts_c))
+temp_h<-sum(rownames(temp) %in% rownames(cts_h))
+temp_l<-sum(rownames(temp) %in% rownames(cts_l))
+temp_hiv<-sum(rownames(temp) %in% rownames(cts_hiv))
+temp_hiv_SS<-sum(rownames(temp) %in% rownames(cts_hiv_alljunctions))
+not_h<-temp_tot-temp_h;not_h_t<-tot_h-temp_h;not_not_h<-total-temp_tot-not_h_t-temp_h
+if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HERVs are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HERVs are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HERVs are not diminished or enriched")}
+not_l<-temp_tot-temp_l;not_l_t<-tot_l-temp_l;not_not_l<-total-temp_tot-not_l_t-temp_l
+if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE L1s are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE L1s are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE L1s are not diminished or enriched")}
+not_hiv<-temp_tot-temp_hiv;not_hiv_t<-tot_hiv-temp_hiv;not_not_hiv<-total-temp_tot-not_hiv_t-temp_hiv
+if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HIV genes are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HIV genes are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HIV genes are not diminished or enriched")}
+not_hiv_SS<-temp_tot-temp_hiv_SS;not_hiv_SS_t<-tot_hiv_SS-temp_hiv_SS;not_not_hiv_SS<-total-temp_tot-not_hiv_SS_t-temp_hiv_SS
+if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HIV splicing sites are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HIV splicing sites are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HIV splicing sites are not diminished or enriched")}
+```
+
+  * HERV families:
+
+```{r EnrichHERV_Families_DE_1,echo=F, message=FALSE, include=T, cache=F}
+lhervs_expr_1<-rownames(rld_LPI_1)[rownames(rld_LPI_1) %in% rownames(cts_h)]
+cts_h_expr_fam_1<-as.data.frame(table(sapply(strsplit(lhervs_expr_1,split="_"),'[[',1)),row.names = 1)
+
+lhervs_DE_1<-rownames(DE_genExpression_1)[rownames(DE_genExpression_1) %in% rownames(cts_h)]
+cts_h_DE_fam_1<-as.data.frame(table(sapply(strsplit(lhervs_DE_1,split="_"),'[[',1)),row.names = 1)
+
+tot_h_expr_1<-sum(cts_h_expr_fam_1[,1])
+tot_h_DE_1<-sum(cts_h_DE_fam_1[,1])
+
+enriched_1<-data.frame(row.names = rownames(cts_h_DE_fam_1),
+                          pvalue=rep(1,length(rownames(cts_h_DE_fam_1))),FDR=rep(1,length(rownames(cts_h_DE_fam_1))))
+reduced_1<-data.frame(row.names = rownames(cts_h_DE_fam_1),
+                         pvalue=rep(1,length(rownames(cts_h_DE_fam_1))),FDR=rep(1,length(rownames(cts_h_DE_fam_1))))
+
+for(j in rownames(cts_h_DE_fam_1)){
+    not_f<-tot_h_DE_1-cts_h_DE_fam_1[j,]
+    not_f_t<-cts_h_expr_fam_1[j,]-cts_h_DE_fam_1[j,]
+    not_not_f<-tot_h_expr_1-not_f-not_f_t-cts_h_DE_fam_1[j,]
+    enriched_1[j,"pvalue"]<-fisher.test(matrix(c(cts_h_DE_fam_1[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                            alternative = "g")$p.value
+    reduced_1[j,"pvalue"]<-fisher.test(matrix(c(cts_h_DE_fam_1[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                           alternative = "l")$p.value
+}
+enriched_1$FDR<-p.adjust(enriched_1[,1],method = "fdr")
+reduced_1$FDR<-p.adjust(reduced_1[,1],method = "fdr")
+
+if(!sum(enriched_1$FDR<0.05)){cat("No family enriched in the DE HERVs from set1")}else{
+  out<-cbind(enriched_1[enriched_1$FDR<0.05,],Family=rownames(enriched_1)[enriched_1$FDR<0.05],
+              Group=as.character(herv_counts[rownames(enriched_1)[enriched_1$FDR<0.05],"Group"]))
+  kable(out, format = "pandoc")
+}
+if(!sum(reduced_1$FDR<0.05)){cat("No family diminished in the DE HERVs from set1")}else{
+  out<-cbind(reduced_1[reduced_1$FDR<0.05,],Family=rownames(reduced_1)[reduced_1$FDR<0.05],
+              Group=as.character(herv_counts[rownames(reduced_1)[reduced_1$FDR<0.05],"Group"]))
+  kable(out, format = "pandoc")
+}
+```
+
+#### _Set2 (11-20)_
+
+  * Features:
+  
+```{r EnrichHERVL1_DE_2,echo=F, message=FALSE, include=T, cache=F}
+total<-length(rownames(rld_LPI_2))
+tot_g<-sum(rownames(rld_LPI_2) %in% rownames(cts_g))
+tot_c<-sum(rownames(rld_LPI_2) %in% rownames(cts_c))
+tot_h<-sum(rownames(rld_LPI_2) %in% rownames(cts_h))
+tot_l<-sum(rownames(rld_LPI_2) %in% rownames(cts_l))
+tot_hiv<-sum(rownames(rld_LPI_2) %in% rownames(cts_hiv))
+tot_hiv_SS<-sum(rownames(rld_LPI_2) %in% rownames(cts_hiv_alljunctions))
+temp<-as.matrix(DE_genExpression_2)
+temp_tot<-dim(temp)[1]
+temp_g<-sum(rownames(temp) %in% rownames(cts_g))
+temp_c<-sum(rownames(temp) %in% rownames(cts_c))
+temp_h<-sum(rownames(temp) %in% rownames(cts_h))
+temp_l<-sum(rownames(temp) %in% rownames(cts_l))
+temp_hiv<-sum(rownames(temp) %in% rownames(cts_hiv))
+temp_hiv_SS<-sum(rownames(temp) %in% rownames(cts_hiv_alljunctions))
+not_h<-temp_tot-temp_h;not_h_t<-tot_h-temp_h;not_not_h<-total-temp_tot-not_h_t-temp_h
+if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HERVs are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HERVs are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HERVs are not diminished or enriched")}
+not_l<-temp_tot-temp_l;not_l_t<-tot_l-temp_l;not_not_l<-total-temp_tot-not_l_t-temp_l
+if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE L1s are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE L1s are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE L1s are not diminished or enriched")}
+not_hiv<-temp_tot-temp_hiv;not_hiv_t<-tot_hiv-temp_hiv;not_not_hiv<-total-temp_tot-not_hiv_t-temp_hiv
+if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HIV genes are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HIV genes are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HIV genes are not diminished or enriched")}
+not_hiv_SS<-temp_tot-temp_hiv_SS;not_hiv_SS_t<-tot_hiv_SS-temp_hiv_SS;not_not_hiv_SS<-total-temp_tot-not_hiv_SS_t-temp_hiv_SS
+if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){x<-fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value
+    cat(paste("DE HIV splicing sites are enriched with p value of:", x,collapse = " "))
+  }else{x<-fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "less")$p.value
+    cat(paste("DE HIV splicing sites are diminished with p value of:", x,collapse = " "))
+  }
+}else{cat("DE HIV splicing sites are not diminished or enriched")}
+```
+
+  * HERV families:
+
+```{r EnrichHERV_Families_DE_2,echo=F, message=FALSE, include=T, cache=F}
+lhervs_expr_2<-rownames(rld_LPI_2)[rownames(rld_LPI_2) %in% rownames(cts_h)]
+cts_h_expr_fam_2<-as.data.frame(table(sapply(strsplit(lhervs_expr_2,split="_"),'[[',1)),row.names = 1)
+
+lhervs_DE_2<-rownames(DE_genExpression_2)[rownames(DE_genExpression_2) %in% rownames(cts_h)]
+cts_h_DE_fam_2<-as.data.frame(table(sapply(strsplit(lhervs_DE_2,split="_"),'[[',1)),row.names = 1)
+
+tot_h_expr_2<-sum(cts_h_expr_fam_2[,1])
+tot_h_DE_2<-sum(cts_h_DE_fam_2[,1])
+
+enriched_2<-data.frame(row.names = rownames(cts_h_DE_fam_2),
+                          pvalue=rep(1,length(rownames(cts_h_DE_fam_2))),FDR=rep(1,length(rownames(cts_h_DE_fam_2))))
+reduced_2<-data.frame(row.names = rownames(cts_h_DE_fam_2),
+                         pvalue=rep(1,length(rownames(cts_h_DE_fam_2))),FDR=rep(1,length(rownames(cts_h_DE_fam_2))))
+
+for(j in rownames(cts_h_DE_fam_2)){
+    not_f<-tot_h_DE_2-cts_h_DE_fam_2[j,]
+    not_f_t<-cts_h_expr_fam_2[j,]-cts_h_DE_fam_2[j,]
+    not_not_f<-tot_h_expr_2-not_f-not_f_t-cts_h_DE_fam_2[j,]
+    enriched_2[j,"pvalue"]<-fisher.test(matrix(c(cts_h_DE_fam_2[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                            alternative = "g")$p.value
+    reduced_2[j,"pvalue"]<-fisher.test(matrix(c(cts_h_DE_fam_2[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                           alternative = "l")$p.value
+}
+enriched_2$FDR<-p.adjust(enriched_2[,1],method = "fdr")
+reduced_2$FDR<-p.adjust(reduced_2[,1],method = "fdr")
+
+if(!sum(enriched_2$FDR<0.05)){cat("No family enriched in the DE HERVs from set2")}else{
+  out<-cbind(enriched_2[enriched_2$FDR<0.05,],Family=rownames(enriched_2)[enriched_2$FDR<0.05],
+              Group=as.character(herv_counts[rownames(enriched_2)[enriched_2$FDR<0.05],"Group"]))
+  kable(out, format = "pandoc")
+}
+if(!sum(reduced_2$FDR<0.05)){cat("No family diminished in the DE HERVs from set2")}else{
+  out<-cbind(reduced_2[reduced_2$FDR<0.05,],Family=rownames(reduced_2)[reduced_2$FDR<0.05],
+              Group=as.character(herv_counts[rownames(reduced_2)[reduced_2$FDR<0.05],"Group"]))
+  kable(out, format = "pandoc")
+}
+```
+
+
+####Conclusion
+
+HERVs and L1 are diminished in the list of DE features. This means that most HERVs and L1 do not present a differential expression in these samples on both data sets. Nevertheless, some of these features are DE. It is important to mention that the DE of HERVs are not family enriched. 
+
+Regarding the HIV splicing sites in set1, which are neither enriched or diminished, could be interpreted as some of the splicing sites (or defective viruses) are not DE in other samples, maybe because of the low frequency of defective provirus in the experiment. Further research on this subject could confirm this hypothesis. 
+
+
+
+###Clustering DE (*set1*)
+
+The expression profiles of the DE features can then be grouped into different clusters. Using a scaled value (z-score) and euclidean distance between all gen pairs a hierarchical clustering (ward.D method) was calculated which is shown as a tree of rows in the heatmap. This tree was used as input for an algorithm for [adaptive branch pruning of hierarchical clustering dendrograms](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/BranchCutting/) with parameters which maximize the number of founded clusters. Results are shown as row annotation of the heatmap. 
+
+####Cluters general
+
+```{r Clus_heat_1,echo=F, message=FALSE, include=T, cache=F, fig.height=6, fig.width=4}
+zvalues<-scale_rows(DE_genExpression_1)
+gen_tree2<-hclust(d = dist(zvalues,method="euclidean"),method = "ward.D")
+clusters<-cutreeDynamic(dendro = gen_tree2, minClusterSize = 100, method="hybrid",
+                        distM=as.matrix(dist(zvalues,method="euclidean")),deepSplit=TRUE,verbose = 0)
+clusters.colours<- labels2colors(clusters, colorSeq=plasma(length(unique(clusters))))
+rowannotation_1$Cluster<-factor(clusters)
+eigengenes<-moduleEigengenes(t(zvalues), clusters, impute=F, scale=F)
+
+ann_colors$Cluster<-plasma(length(unique(clusters)))
+names(ann_colors$Cluster)<-1:length(unique(clusters))
+
+plot_lines_1<-function(mat, cex=1,color, color_an, ann_colors){
+	ggplot(mat,aes(x=Var2,y=value,group=Var1))+
+	geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 0, ymax = 0, fill = 'Treatment'), alpha = .2)+
+	geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 0, ymax = 0, fill = 'Gag'), alpha = .2)+
+	geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 2.6, ymax = 2.75, fill = 'Uninfected'), alpha = .2)+
+	geom_rect(aes(xmin = 'X1',xmax = 'X2',ymin = 2.8, ymax = 2.95, fill = 'CTL'), alpha = .2)+
+	geom_rect(aes(xmin = 'X7',xmax = 'X9',ymin = 2.6, ymax = 2.75, fill = 'Negative'), alpha = .2)+
+	geom_rect(aes(xmin = 'X7',xmax = 'X9',ymin = 2.8, ymax = 2.95, fill = 'Mock'), alpha = .2)+
+	geom_rect(aes(xmin = 'X10',xmax = 'X8',ymin = 2.6, ymax = 2.75, fill = 'Positive'))+
+	geom_rect(aes(xmin = 'X10',xmax = 'X8',ymin = 2.8, ymax = 2.95, fill = 'Mock'))+
+	geom_rect(aes(xmin = 'X3',xmax = 'X5',ymin = 2.6, ymax = 2.75, fill = 'Negative'), alpha = .2)+
+	geom_rect(aes(xmin = 'X3',xmax = 'X5',ymin = 2.8, ymax = 2.95, fill = 'CTL'), alpha = .2)+
+	geom_rect(aes(xmin = 'X4',xmax = 'X6',ymin = 2.6, ymax = 2.75, fill = 'Positive'))+
+	geom_rect(aes(xmin = 'X4',xmax = 'X6',ymin = 2.8, ymax = 2.95, fill = 'CTL'))+
+	geom_line(cex=cex,aes(color= Type))+ labs(fill="", color=color_an)+
+	ylim(-2.5,3)+ylab("Z-score")+xlab("")+
+	scale_color_manual(values=ann_colors[[color]],drop=FALSE)+
+	scale_fill_manual(breaks=c("Treatment",names(ann_colors$Treatment),"Gag",names(ann_colors$Gag)),
+			values=c(Treatment="white",ann_colors$Treatment,Gag="white",ann_colors$Gag),drop=FALSE)+
+	theme_cowplot(12)+
+	theme(text = element_text(size=15))
+}
+
+
+heat_all_1<-pheatmap(DE_genExpression_1,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,
+         cluster_cols=TRUE, scale = "row",
+         annotation_col=coldata[colnames(y_1$counts),c("Gag","Treatment")],
+         annotation_row=rowannotation_1,fontsize = 8,
+         cutree_rows = length(unique(clusters)),
+         color = viridis(30, direction = -1),annotation_colors = ann_colors,
+         clustering_method = "ward.D", silent=T)
+lheat_subg<-list()
+llin_subg<-list()
+ltable<-list()
+clusters<-factor(clusters)
+ploting_clusters_1<-as.data.frame(cbind(DE_genExpression_1,clusters))
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression_1[ploting_clusters_1$clusters == i, heat_all_1$tree_col$order])
+Type<-rowannotation_1[rownames(temp),]
+rowannotationTemp<-as.data.frame(Type, row.names=rownames(temp))
+temp_ann_colors<-ann_colors
+temp_ann_colors[["Type"]]<-temp_ann_colors[["Type"]][unique(rowannotationTemp[,"Type"])]
+temp_ann_colors[["Cluster"]]<-temp_ann_colors[["Cluster"]][unique(rowannotationTemp[,"Cluster"])]
+
+lheat_subg[[i]]<-pheatmap(temp,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,cluster_cols=F,annotation_colors = temp_ann_colors, annotation_col=coldata[colnames(y_1$counts),c("Gag","Treatment")],annotation_row = rowannotationTemp,scale="row",color = viridis(30, direction = -1),clustering_method = "ward.D", silent = T)[[4]]
+temp<-(temp-rowMeans(temp))/rowSds(temp)
+temp<-melt(temp)
+temp$Type<-rowannotationTemp[temp$Var1,"Type"]
+temp$Type<-factor(temp$Type)
+temp$Var2<-factor(temp$Var2,levels=colnames(DE_genExpression_1)[heat_all_1$tree_col$order])
+ltable[[i]]<-table(unique(temp[,c("Var1","Type")])[,2])
+llin_subg[[i]]<-plot_lines_1(mat=temp, cex=0.5,color="Type", color_an="Feature", ann_colors=ann_colors)
+}
+
+plot_grid(ncol=1,heat_all_1[[4]])
+```
+
+####Heatmap each cluster
+
+Heatmap of each cluster (it is important to mention that further sub-clustering could be detected but first we will analyze these clusters):
+
+```{r multiClus_heat_1,echo=F, message=FALSE, include=T, cache=F, fig.height=13, fig.width=15}
+plot_grid(ncol=3,plotlist = lheat_subg,labels = 1:length(unique(clusters)))
+```
+
+####Line representation each cluster
+
+The following plots represent the scaled value of normalized expression (Z-score) for each cluster. Each line represent a feature x-axis represent the samples (order is equal as the heatmap) and y-axis represent Z-score in each sample. The idea behind these graphs is to explore the clusters in a different way as the heatmap, nevertheless the values are same as the heatmaps. 
+
+```{r multiClus_lines_1,echo=F, message=FALSE, include=T, cache=F, fig.height=11, fig.width=15}
+plot_grid(ncol=3,plotlist = llin_subg,labels = 1:length(unique(clusters)))
+```
+
+####Average each cluster
+
+The average z-values per sample per cluster are shown next:
+
+```{r model_1, echo=F, message=FALSE, include=T, cache=F, fig.height=11, fig.width=15}
+
+alv<-moduleEigengenes(t(zvalues), clusters, impute=F, scale=F)
+llin_subg<-list()
+
+for(i in 1:length(unique(clusters))){
+  temp2<-t(alv$averageExpr[,i])
+  colnames(temp2)<-rownames(alv$eigengenes)
+  temp2<-melt(temp2[,heat_all_1$tree_col$order])
+  temp2$sample<-factor(rownames(temp2), levels=rownames(temp2))
+  colnames(temp2)<-c("value","Var2")
+  temp2$Var1<-1
+  temp2$Type<-factor(i)
+  llin_subg[[i]]<-plot_lines_1(mat=temp2, cex=1.5,color="Cluster", color_an="Cluster", ann_colors=ann_colors)
+}
+plot_grid(ncol=3,plotlist = llin_subg)
+```
+
+####Numbers each cluster
+
+These tables show the feature count for each cluster:
+
+```{r multiClus_tables_2,echo=F, message=FALSE, include=T, cache=F,paged.print=F}
+cat(paste(paste0("cluster ",1:length(unique(clusters))),collapse ="\t"))
+kable(ltable, format="pandoc")
+```
+
+####Clusters with HIV genes or HIV splicing sites
+
+Some HIV genes and HIV splicing sites are not in the same clusters, lets take a closer look:
+
+```{r HIV_clus_heat,echo=F, message=FALSE, include=T, cache=F,fig.height=10, fig.width=17}
+DE_genExpression2<-DE_genExpression_1[rownames(DE_genExpression_1) %in%
+                                    c(rownames(cts_h),rownames(cts_l),rownames(cts_hiv),rownames(cts_hiv_alljunctions)),]
+ploting_clusters2<-ploting_clusters_1[rownames(ploting_clusters_1) %in%
+                                    c(rownames(cts_h),rownames(cts_l),rownames(cts_hiv),rownames(cts_hiv_alljunctions)),]
+lheat_subg2<-list()
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression2[ploting_clusters2$clusters == i, heat_all_1$tree_col$order])
+Type<-rowannotation_1[rownames(temp),]
+rowannotationTemp<-as.data.frame(Type, row.names=rownames(temp))
+temp_ann_colors<-ann_colors
+temp_ann_colors[["Type"]]<-temp_ann_colors[["Type"]][unique(rowannotationTemp[,"Type"])]
+temp_ann_colors[["Cluster"]]<-temp_ann_colors[["Cluster"]][unique(rowannotationTemp[,"Cluster"])]
+
+
+
+lheat_subg2[[i]]<-pheatmap(temp,cluster_rows=TRUE, show_rownames=TRUE,border_color = NA,cluster_cols=F,annotation_colors = temp_ann_colors, annotation_col=coldata[colnames(y_1$counts),c("Gag","Treatment")],annotation_row = rowannotationTemp,scale="row",color = viridis(30, direction = -1),clustering_method = "ward.D", silent = T)[[4]]
+}
+
+sub_clus<-sort(unique(ploting_clusters2$clusters[rownames(ploting_clusters2) %in% c(rownames(cts_hiv), rownames(cts_hiv_alljunctions))]))
+plot_grid(ncol=3,plotlist = lheat_subg2[sub_clus],labels = sub_clus)
+
+```
+
+#####Conclusion
+
+One cluster could be interpret as the functional splicing sites, other is mainly formed of LTR-LTR which represents a ineffective provirus being expressed, and the last is specific for mock survivor cells. Other interpretations could arise exploring the expression patters of each cluster.  
+
+#### *Interpretation of clusters*
+
+Clusters could be biological interpreted; for example cluster 2 and cluster 5 looked as opposite patterns and HIV genes are grouped into cluster 5 therefore this two clusters could be related to the response to HIV gene expression. This means features in cluster 5 are positively co-expressed with HIV genes and cluster 2 negatively co-expressed. Mathematical: the distances between clusters was calculated as 1-absolute(correlation of ~average z-values). With this formula similar patterns or the complete opposite patterns are close together. This tree show cluster similarities 
+
+```{r cluster_similarities, echo=F, message=FALSE, include=T, cache=F, fig.height=4, fig.width=4}
+MEDiss <- 1-abs(cor(alv$averageExpr))
+METree <- hclust(as.dist(MEDiss), method = 'ward.D')
+plot.phylo(as.phylo(METree),type = 'phylogram',show.tip.label = FALSE, main='')
+tiplabels(frame = 'circle',col='black', text=as.character(1:length(unique(clusters))), bg = levels(as.factor(clusters.colours)))
+```
+
+-   5.Co-expressed with HIV genes (positive)
+-   2.Co-expressed with HIV genes (negative)
+-   7.Up-regulated genes in "Mock Survivors"
+-   9._Cryptic Pattern_
+-   6.Effect of CTL treatment (positive)
+-   1.Effect of CTL treatment (negative)
+-   8.Up-regulated genes in "Real Survivors"
+-   4.Effect of Gag positives (maybe defective provirus) (positive)
+-   3.Effect of Gag positives (maybe defective provirus) (negative)
+
+####Enrichment/Diminished of features
+
+Next question was if some features were enriched/diminished in a single cluster (fisher exact test, universe=Differentially expressed features). I did this because I wanted to explore if HERVs or L1 are more prevalent or excluded from a cluster.
+
+```{r clusEnriDimi,echo=F, message=FALSE, include=T, cache=F}
+total<-length(rownames(DE_genExpression_1))
+tot_g<-sum(rownames(DE_genExpression_1) %in% rownames(cts_g))
+tot_c<-sum(rownames(DE_genExpression_1) %in% rownames(cts_c))
+tot_h<-sum(rownames(DE_genExpression_1) %in% rownames(cts_h))
+tot_l<-sum(rownames(DE_genExpression_1) %in% rownames(cts_l))
+tot_hiv<-sum(rownames(DE_genExpression_1) %in% rownames(cts_hiv))
+tot_hiv_SS<-sum(rownames(DE_genExpression_1) %in% rownames(cts_hiv_alljunctions))
+
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression_1[ploting_clusters_1$clusters == i, heat_all_1$tree_col$order])
+temp_tot<-dim(temp)[1]
+temp_g<-sum(rownames(temp) %in% rownames(cts_g))
+temp_c<-sum(rownames(temp) %in% rownames(cts_c))
+temp_h<-sum(rownames(temp) %in% rownames(cts_h))
+temp_l<-sum(rownames(temp) %in% rownames(cts_l))
+temp_hiv<-sum(rownames(temp) %in% rownames(cts_hiv))
+temp_hiv_SS<-sum(rownames(temp) %in% rownames(cts_hiv_alljunctions))
+not_h<-temp_tot-temp_h;not_h_t<-tot_h-temp_h;not_not_h<-total-temp_tot-not_h_t-temp_h
+if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HERVs from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HERVs from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_l<-temp_tot-temp_l;not_l_t<-tot_l-temp_l;not_not_l<-total-temp_tot-not_l_t-temp_l
+if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("L1s from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("L1s from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_hiv<-temp_tot-temp_hiv;not_hiv_t<-tot_hiv-temp_hiv;not_not_hiv<-total-temp_tot-not_hiv_t-temp_hiv
+if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HIV genes from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HIV genes from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_hiv_SS<-temp_tot-temp_hiv_SS;not_hiv_SS_t<-tot_hiv_SS-temp_hiv_SS;not_not_hiv_SS<-total-temp_tot-not_hiv_SS_t-temp_hiv_SS
+if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HIV splicing sites from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HIV splicing sites from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}}
+```
+
+#####Conclusion
+
+It is important to mention that HIV genes and splicing sites, as expected are enriched in cluster 5. HIV splicing sites are also enriched in cluster 4, but most of them are LTR-LTR (ineffective provirus).
+
+HERVs, as general, are only enriched in cluster 3. This means that HERVs preferentially present this pattern of expression compared to the others. The pattern of expression could be interpreted as silencing of features due to the effect of Gag positive, maybe defective provirus (as in cluster 4). Further research on this need to be done.
+
+L1s are diminished in cluster 2 and could be interpreted as if L1 are avoiding this pattern of expression, which is a negative co-expression of HIV genes. This could mean HIV genes are not silencing L1's expression but this hypothesis needs to be experimentally validated.  
+
+
+####Enrichment/Diminished of HERV families
+
+HERVs families enrichment/diminished analysis was performed on each cluster (universe = HERVs DE, fisher exact test + FDR p-value correction). The idea behind this is that members of a HERV(s) family(es) could be preferentially found in a cluster, or the contrary avoiding the cluster. The results are shown here:
+
+```{r clusEnriDimi_HERV,echo=F, message=FALSE, include=T, cache=F}
+enriched2<-list()
+reduced2<-list()
+
+list_hervs_exrp_1<-rownames(DE_genExpression_1)[rownames(DE_genExpression_1) %in% rownames(cts_h)]
+hervs_expr_1<-as.data.frame(table(sapply(strsplit(list_hervs_exrp_1,split="_"),'[[',1)),row.names = 1)
+total_expr_1<-sum(hervs_expr_1[,1])
+
+for(i in 1:length(unique(clusters))){
+  lhervs_temp<-rownames(DE_genExpression_1)[rownames(DE_genExpression_1) %in% rownames(cts_h) & ploting_clusters_1$clusters == i]
+  cts_temp_group<-as.data.frame(table(sapply(strsplit(lhervs_temp,split="_"),'[[',1)),row.names = 1)
+  tot_temp_group<-sum(cts_temp_group[,1])
+  enriched2[[i]]<-data.frame(row.names = rownames(cts_temp_group),counts=cts_temp_group$Freq,
+                          pvalue=rep(1,length(rownames(cts_temp_group))),FDR=rep(1,length(rownames(cts_temp_group))))
+  reduced2[[i]]<-data.frame(row.names = rownames(cts_temp_group),counts=cts_temp_group$Freq,
+                         pvalue=rep(1,length(rownames(cts_temp_group))),FDR=rep(1,length(rownames(cts_temp_group))))
+  for(j in rownames(cts_temp_group)){
+    not_f<-tot_temp_group-cts_temp_group[j,]
+    not_f_t<-hervs_expr_1[j,]-cts_temp_group[j,]
+    not_not_f<-total_expr_1-not_f-not_f_t-cts_temp_group[j,]
+    enriched2[[i]][j,"pvalue"]<-fisher.test(matrix(c(cts_temp_group[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                            alternative = "g")$p.value
+    reduced2[[i]][j,"pvalue"]<-fisher.test(matrix(c(cts_temp_group[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                           alternative = "l")$p.value
+  }
+  enriched2[[i]]$FDR<-p.adjust(enriched2[[i]]$pvalue,method = "fdr")
+  reduced2[[i]]$FDR<-p.adjust(reduced2[[i]]$pvalue,method = "fdr")
+}
+cat("Enriched:")
+lapply(enriched2, function(x){if (sum(x$FDR<0.1)){
+  return(cbind(x[x$FDR<0.1,],Family=rownames(x)[x$FDR<0.1],
+               Group=as.character(herv_counts[rownames(x)[x$FDR<0.1],"Group"])))}})
+cat("Diminished:")
+lapply(reduced2, function(x){if (sum(x$FDR<0.1)){
+  return(cbind(x[x$FDR<0.1,],Family=rownames(x)[x$FDR<0.1],
+               Group=as.character(herv_counts[rownames(x)[x$FDR<0.1],"Group"])))}})
+
+```
+
+#####Conclusion
+
+No HERV family was diminished or enriched in any cluster.
+
+
+####Gene list enrichment
+
+The last feature analyzed were the genes and several enrichment analysis on the genes from each clusters were performed. Two different enrichment analysis of gene ontology were performed (universe=expressed genes) on each cluster. The first one used a mixture of two algorithms (elim and weight) [(explanation)](http://avrilomics.blogspot.com/2015/07/using-topgo-to-test-for-go-term.html) and the second one uses a classical approach and a FDR p-value correction. Both algorithms were implemented using the [topGO](https://bioconductor.org/packages/release/bioc/html/topGO.html) bioconductor package. The main difference between the two algorithms is that the first one takes into account the parent and child GO hierarchy and the second one treat each term as individual. *Biological Processes* were tested. 
+
+#####GO Alternative approach
+
+These are the top 10 GO enriched with the mixture GO enrichment analysis. 
+
+```{r GO_1,echo=F, message=FALSE, include=T,eval=T,warning=FALSE, cache=F,results='asis'}
+
+DE_genExpression3<-DE_genExpression_1[rownames(DE_genExpression_1) %in% rownames(cts_g),]
+ploting_clusters3<-ploting_clusters_1[rownames(ploting_clusters_1) %in% rownames(cts_g),]
+ltable<-list()
+DE_GeneList<-list()
+wcl<-list()
+rec_l<-list()
+rec<-""
+
+for( i in 1:length(unique(clusters))){
+  
+gene_list<-rownames(DE_genExpression3[ploting_clusters3$clusters ==i,])
+DE_GeneList[[i]]<-bitr(unique(sapply(strsplit(gene_list,split = ".",fixed=T),'[[',1)),
+                      fromType = "ENSEMBL",toType = c("ENTREZID"),
+                      OrgDb = org.Hs.eg.db)$ENTREZID
+
+expressed_genes<-rownames(rld_LPI_1)
+expressed_genes_mod<-factor(as.numeric(expressed_genes %in% gene_list))
+names(expressed_genes_mod)<-expressed_genes
+
+
+sampleGOdata <- new("topGOdata", ontology = "BP",allGenes =expressed_genes_mod,
+   nodeSize = 5, annot = annFUN.gene2GO,gene2GO=GOS)
+
+resultweight <- runTest(sampleGOdata, algorithm = "weight01", statistic = "fisher")
+resultclassic <- runTest(sampleGOdata, algorithm = "classic", statistic = "fisher")
+FDR<-resultclassic
+score(FDR)<-p.adjust(score(FDR), method='fdr')
+
+rec<- enrichPathway(gene=DE_GeneList[[i]],organism ='human',
+                 pvalueCutoff = 0.05,qvalueCutoff=0.1,readable=TRUE,universe = universe_1)
+rec_l[[i]]<-rec@result[rec@result$p.adjust<0.1,c("Description","p.adjust","geneID")]
+
+if(length(rec_l[[i]][,1])){
+  fileGO<-paste0("Reactome_cluster_",i,".txt")
+  write.table(rec_l[[i]],file=fileGO,quote=F,sep="\t", row.names = F)
+}
+
+
+if(sum(score(resultweight)<0.01)){
+  if(sum(score(resultweight)<0.01)>10){
+    gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+           ranksOf = "Classic",topNodes = 10)
+  }else{
+    gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+         ranksOf = "Classic",topNodes = sum(score(resultweight)<0.01))
+  }
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+clusterName<-paste0("Cluster ",i," (",sum(score(resultweight)<0.01)," GOs enriched):")
+print(kable(gtable,format = "pandoc",caption = clusterName,align = "c"))
+cat('\n')
+fileGO<-paste0("GOEnriched_cluster_Weight101_",i,".txt")
+gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+         ranksOf = "Classic",topNodes = sum(score(resultweight)<0.01))
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+write.table(gtable,file=fileGO,sep="\t",quote=F,row.names = F)
+}
+
+if(sum(score(FDR)<0.05)){
+fileGO<-paste0("GOEnriched_cluster_classical_",i,".txt")
+gtable<-GenTable(sampleGOdata, Classic = resultclassic, FDR=FDR, orderBy = "FDR",topNodes = sum(score(FDR)<0.05))
+text<-paste(Definition(GOTERM[gtable$GO.ID]),collapse = " ")
+text<-paste(Term(GOTERM[gtable$GO.ID]),collapse = " ")
+text<-removeWords(text,c(firstup(stopwords("english")),stopwords("english"), "Process", "process", "etc", "regulation", "cell", "positive", "metabolic", "response"))
+text<-removePunctuation(text,preserve_intra_word_dashes=T)
+text<-stripWhitespace(text)
+counts_go <- as.data.frame(table(strsplit(text,split = " ")))
+colnames(counts_go)<-c("word","freq")
+wcl[[i]]<-ggwordcloud(words = counts_go$word, freq = counts_go$freq, min.freq = 3,
+            random.order=FALSE,random.color = F, rot.per = 0,
+            colors=brewer.pal(8, "Dark2"), shape="circle", area_corr=T)
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+write.table(gtable,file=fileGO,sep="\t",quote=F,row.names = F)
+}
+}
+
+```
+
+#####GO Classical approach
+
+Since most of the clusters are enriched with several GO I decided to represent those with a word cloud of the GO Term's significantly enriched in each cluster. (words removed: process, regulation, cell, positive, metabolic, response) 
+
+```{r wordcould_GO, echo=F,message=FALSE, include=T, eval=T,cache=F,results='asis',fig.height=11, fig.width=15}
+plot_grid(ncol=3,plotlist = wcl,labels = 1:length(unique(clusters)))
+```
+
+Cluster 3 does not has a word cloud since no GO was enriched in this cluster. 
+
+#####Reactome
+
+[Reactome](https://reactome.org/) is another data base with gene annotations which was also used. I only looked for statistical enriched terms with two keywords; HIV and virus (viral). 
+
+###### *HIV*
+
+```{r HIV_reactome_1,echo=F, message=FALSE, include=T, eval=T,cache=F}
+cat("Terms:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "HIV")
+                            if(length(cts)){ return(x[cts,"Description"])}})
+cat("Genes:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "HIV")
+                            if(length(cts)){return(
+  unique(unlist(strsplit(paste(as.character(x[cts,"geneID"]), collapse = "/"),split = "/")))) }})
+```
+
+Cluster 8 stands for features which are up-regulated in “Real Survivors” and Reactome enrichment pathway showed 9 pathways related to HIV, specifically with Tat. Interestingly these pathways share 8 genes and further understanding of these genes could explain the experiment results.   
+
+
+###### *Virus*
+
+```{r virus_reactome_1,echo=F, message=FALSE, include=T,eval=T, cache=F}
+cat("Terms:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "virus|Virus|viral|Viral")
+                            if(length(cts)){ return(x[cts,"Description"])}})
+cat("Genes:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "virus|Virus|viral|Viral")
+                            if(length(cts)){return(
+  unique(unlist(strsplit(paste(as.character(x[cts,"geneID"]), collapse = "/"),split = "/")))) }})
+```
+
+###### Conclusions
+
+The results of Reactome pathway enrichment of cluster 2 are also interesting, since cluster 2 stands for a negative co-expression of HIV genes. This means that "viral mRNA translation" is down-regulated when HIV genes are highly expressed.  
+*Important*: All results from GO alternative approach, GO classical approach and reactome analyses are available in plain text format. 
+
+####General Conclusions (*set1*)
+
+9 different clusters were identified based on the DE expressed features, each with a distinguishable expression pattern. These patterns could be biological interpreted and several conclusions could arise from downstream analyses. 
+
+HERVs are enriched in cluster 3, this cluster represent the negative effect of Gag positive cells and its contrast cluster is cluster 4. This cluster has GO categories enriched related to regulation of transcription in response to stress (like hypoxia). HERVs from cluster 3 in contrast with HERVs in cluster 4 need further research for understanding their regulation.
+
+The diminishment of L1's from cluster 2 needs to be studied deeper. 
+
+###Clustering DE (*set2*)
+
+I did similar analyses for the set2, 5 clusters could be observed.
+
+####Cluters general
+
+```{r Clus_heat2,echo=F, message=FALSE, include=T, cache=F, eval=T,fig.height=4, fig.width=4}
+zvalues<-scale_rows(DE_genExpression_2)
+gen_tree2<-hclust(d = dist(zvalues,method="euclidean"),method = "ward.D")
+clusters<-cutreeDynamic(dendro = gen_tree2, minClusterSize = 100, method="hybrid",
+                        distM=as.matrix(dist(zvalues,method="euclidean")),deepSplit=TRUE,verbose = 0)
+clusters.colours<- labels2colors(clusters, colorSeq=plasma(length(unique(clusters))))
+rowannotation_2$Cluster<-factor(clusters)
+eigengenes<-moduleEigengenes(t(zvalues), clusters, impute=F, scale=F)
+
+ann_colors$Cluster<-plasma(length(unique(clusters)))
+names(ann_colors$Cluster)<-1:length(unique(clusters))
+
+plot_lines_2<-function(mat, cex=1,color, color_an, ann_colors){
+	ggplot(mat,aes(x=Var2,y=value,group=Var1))+
+	geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 0, ymax = 0, fill = 'Treatment'), alpha = .2)+
+  geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 0, ymax = 0, fill = 'Gag'), alpha = .2)+
+  geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 2.6, ymax = 2.75, fill = 'Positive'), alpha = .2)+
+  geom_rect(aes(xmin = 'X18',xmax = 'X20',ymin = 2.8, ymax = 2.95, fill = 'Mock'), alpha = .2)+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 2.6, ymax = 2.75, fill = 'Positive'), alpha = .2)+
+  geom_rect(aes(xmin = 'X14',xmax = 'X16',ymin = 2.8, ymax = 2.95, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X11',xmax = 'X12',ymin = 2.6, ymax = 2.75, fill = 'Uninfected'))+
+  geom_rect(aes(xmin = 'X11',xmax = 'X12',ymin = 2.8, ymax = 2.95, fill = 'CTL'))+
+  geom_rect(aes(xmin = 'X13',xmax = 'X15',ymin = 2.6, ymax = 2.75, fill = 'Negative'), alpha = .2)+
+  geom_rect(aes(xmin = 'X13',xmax = 'X15',ymin = 2.8, ymax = 2.95, fill = 'CTL'), alpha = .2)+
+  geom_rect(aes(xmin = 'X17',xmax = 'X19',ymin = 2.6, ymax = 2.75, fill = 'Negative'))+
+  geom_rect(aes(xmin = 'X17',xmax = 'X19',ymin = 2.8, ymax = 2.95, fill = 'Mock'))+
+	geom_line(cex=cex,aes(color= Type))+ labs(fill="", color=color_an)+
+	ylim(-2.5,3)+ylab("Z-score")+xlab("")+
+	scale_color_manual(values=ann_colors[[color]],drop=FALSE)+
+	scale_fill_manual(breaks=c("Treatment",names(ann_colors$Treatment),"Gag",names(ann_colors$Gag)),
+			values=c(Treatment="white",ann_colors$Treatment,Gag="white",ann_colors$Gag),drop=FALSE)+
+	theme_cowplot(12)+
+	theme(text = element_text(size=15))
+}
+
+
+heat_all_2<-pheatmap(DE_genExpression_2,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,
+         cluster_cols=TRUE, scale = "row",fontsize = 8,
+         annotation_col=coldata[colnames(y_2$counts),c("Gag","Treatment")],
+         annotation_row=rowannotation_2,
+         cutree_rows = length(unique(clusters)),
+         color = viridis(30, direction = -1),annotation_colors = ann_colors,
+         clustering_method = "ward.D", silent=T)
+lheat_subg<-list()
+llin_subg<-list()
+ltable<-list()
+clusters<-factor(clusters)
+ploting_clusters_2<-as.data.frame(cbind(DE_genExpression_2,clusters))
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression_2[ploting_clusters_2$clusters == i, heat_all_2$tree_col$order])
+Type<-rowannotation_2[rownames(temp),]
+rowannotationTemp<-as.data.frame(Type, row.names=rownames(temp))
+temp_ann_colors<-ann_colors
+temp_ann_colors[["Type"]]<-temp_ann_colors[["Type"]][unique(rowannotationTemp[,"Type"])]
+temp_ann_colors[["Cluster"]]<-temp_ann_colors[["Cluster"]][unique(rowannotationTemp[,"Cluster"])]
+
+lheat_subg[[i]]<-pheatmap(temp,cluster_rows=TRUE, show_rownames=FALSE,border_color = NA,cluster_cols=F,annotation_colors = temp_ann_colors, annotation_col=coldata[colnames(y_2$counts),c("Gag","Treatment")],annotation_row = rowannotationTemp,scale="row",color = viridis(30, direction = -1),clustering_method = "ward.D", silent = T)[[4]]
+temp<-(temp-rowMeans(temp))/rowSds(temp)
+temp<-melt(temp)
+temp$Type<-rowannotationTemp[temp$Var1,"Type"]
+temp$Type<-factor(temp$Type)
+temp$Var2<-factor(temp$Var2,levels=colnames(DE_genExpression_2)[heat_all_2$tree_col$order])
+ltable[[i]]<-table(unique(temp[,c("Var1","Type")])[,2])
+llin_subg[[i]]<-plot_lines_2(mat=temp, cex=0.5,color="Type", color_an="Feature", ann_colors=ann_colors)
+}
+
+plot_grid(ncol=1,heat_all_2[[4]])
+```
+
+####Heatmap each cluster
+
+```{r multiClus_heat_2,echo=F, message=FALSE, include=T, cache=F,eval=T, fig.height=7.5, fig.width=15}
+plot_grid(ncol=3,plotlist = lheat_subg,labels = 1:length(unique(clusters)))
+```
+
+####Line representation each cluster
+
+*Important:* Conditions are sorted based on heatmap, and **DO NOT** have the same order as set1. 
+
+```{r multiClus_lines_2,echo=F, message=FALSE, include=T, cache=F, eval=T,fig.height=7.5, fig.width=15}
+plot_grid(ncol=3,plotlist = llin_subg,labels = 1:length(unique(clusters)))
+```
+
+####Average each cluster
+
+```{r model_2, echo=F, message=FALSE, include=T, cache=F, eval=T,fig.height=7.5, fig.width=15}
+
+alv<-moduleEigengenes(t(zvalues), clusters, impute=F, scale=F)
+llin_subg<-list()
+
+for(i in 1:length(unique(clusters))){
+  temp2<-t(alv$averageExpr[,i])
+  colnames(temp2)<-rownames(alv$eigengenes)
+  temp2<-melt(temp2[,heat_all_2$tree_col$order])
+  temp2$sample<-factor(rownames(temp2), levels=rownames(temp2))
+  colnames(temp2)<-c("value","Var2")
+  temp2$Var1<-1
+  temp2$Type<-factor(i)
+  llin_subg[[i]]<-plot_lines_2(mat=temp2, cex=1.5,color="Cluster", color_an="Cluster", ann_colors=ann_colors)
+}
+plot_grid(ncol=3,plotlist = llin_subg)
+```
+
+
+####Numbers each cluster
+
+```{r multiClus_tables_1,echo=F, message=FALSE, include=T, eval=T,cache=F}
+cat(paste(paste0("cluster ",1:length(unique(clusters))),collapse ="\t"))
+kable(ltable, format="pandoc")
+```
+
+####Clusters with HIV genes or HIV splicing sites
+
+```{r HIV_clus_heat_2,echo=F, message=FALSE, include=T, cache=F,eval=T,fig.height=15, fig.width=15}
+DE_genExpression2<-DE_genExpression_2[rownames(DE_genExpression_2) %in%
+                                    c(rownames(cts_h),rownames(cts_l),rownames(cts_hiv),rownames(cts_hiv_alljunctions)),]
+ploting_clusters2<-ploting_clusters_2[rownames(ploting_clusters_2) %in%
+                                    c(rownames(cts_h),rownames(cts_l),rownames(cts_hiv),rownames(cts_hiv_alljunctions)),]
+lheat_subg2<-list()
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression2[ploting_clusters2$clusters == i, heat_all_2$tree_col$order])
+Type<-rowannotation_2[rownames(temp),]
+rowannotationTemp<-as.data.frame(Type, row.names=rownames(temp))
+temp_ann_colors<-ann_colors
+temp_ann_colors[["Type"]]<-temp_ann_colors[["Type"]][unique(rowannotationTemp[,"Type"])]
+temp_ann_colors[["Cluster"]]<-temp_ann_colors[["Cluster"]][unique(rowannotationTemp[,"Cluster"])]
+
+lheat_subg2[[i]]<-pheatmap(temp,cluster_rows=TRUE, show_rownames=TRUE,border_color = NA,cluster_cols=F,annotation_colors = temp_ann_colors, annotation_col=coldata[colnames(y_2$counts),c("Gag","Treatment")],annotation_row = rowannotationTemp,scale="row",color = viridis(30, direction = -1),clustering_method = "ward.D", silent = T)[[4]]
+}
+
+sub_clus<-sort(unique(ploting_clusters2$clusters[rownames(ploting_clusters2) %in% c(rownames(cts_hiv), rownames(cts_hiv_alljunctions))]))
+plot_grid(ncol=2,plotlist = lheat_subg2[sub_clus],labels = sub_clus)
+
+```
+
+#####Conclusion
+
+HIV splicing sites are mainly in cluster1, nevertheless another splicing site is also DE in cluster 4. Cluster 4 has a _cryptic pattern_ but the heatmap shows that the splicing site is highly expressed in the mock survivors. This splicing site is in ENV and might be a small deletion (~30 nts).
+
+####Interpretation of clusters
+
+```{r cluster_similarities_2, echo=F, message=FALSE, include=T, cache=F,eval=T, fig.height=4, fig.width=4}
+MEDiss <- 1-abs(cor(alv$averageExpr))
+METree <- hclust(as.dist(MEDiss), method = 'ward.D')
+plot.phylo(as.phylo(METree),type = 'phylogram',show.tip.label = FALSE, main='')
+tiplabels(frame = 'circle',col='black', text=as.character(1:length(unique(clusters))), bg = levels(as.factor(clusters.colours)))
+```
+
+-   2.Co-expressed with HIV genes (negative)
+-   1.Co-expressed with HIV genes (positive)
+-   4._Cryptic Pattern_
+-   5.Effect of CTL + Gag positive (positive)
+-   3.Effect of CTL + Gag positive (negative)
+
+####Enrichment/Diminished of features
+
+```{r clusEnriDimi_1,echo=F, message=FALSE, include=T, eval=T,cache=F}
+total<-length(rownames(DE_genExpression_2))
+tot_g<-sum(rownames(DE_genExpression_2) %in% rownames(cts_g))
+tot_c<-sum(rownames(DE_genExpression_2) %in% rownames(cts_c))
+tot_h<-sum(rownames(DE_genExpression_2) %in% rownames(cts_h))
+tot_l<-sum(rownames(DE_genExpression_2) %in% rownames(cts_l))
+tot_hiv<-sum(rownames(DE_genExpression_2) %in% rownames(cts_hiv))
+tot_hiv_SS<-sum(rownames(DE_genExpression_2) %in% rownames(cts_hiv_alljunctions))
+
+for(i in 1:length(unique(clusters))){
+temp<-as.matrix(DE_genExpression_2[ploting_clusters_2$clusters == i, heat_all_2$tree_col$order])
+temp_tot<-dim(temp)[1]
+temp_g<-sum(rownames(temp) %in% rownames(cts_g))
+temp_c<-sum(rownames(temp) %in% rownames(cts_c))
+temp_h<-sum(rownames(temp) %in% rownames(cts_h))
+temp_l<-sum(rownames(temp) %in% rownames(cts_l))
+temp_hiv<-sum(rownames(temp) %in% rownames(cts_hiv))
+temp_hiv_SS<-sum(rownames(temp) %in% rownames(cts_hiv_alljunctions))
+not_h<-temp_tot-temp_h;not_h_t<-tot_h-temp_h;not_not_h<-total-temp_tot-not_h_t-temp_h
+if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_h,not_h_t,not_h,not_not_h),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HERVs from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HERVs from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_l<-temp_tot-temp_l;not_l_t<-tot_l-temp_l;not_not_l<-total-temp_tot-not_l_t-temp_l
+if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_l,not_l_t,not_l,not_not_l),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("L1s from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("L1s from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_hiv<-temp_tot-temp_hiv;not_hiv_t<-tot_hiv-temp_hiv;not_not_hiv<-total-temp_tot-not_hiv_t-temp_hiv
+if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv,not_hiv_t,not_hiv,not_not_hiv),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HIV genes from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HIV genes from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}
+not_hiv_SS<-temp_tot-temp_hiv_SS;not_hiv_SS_t<-tot_hiv_SS-temp_hiv_SS;not_not_hiv_SS<-total-temp_tot-not_hiv_SS_t-temp_hiv_SS
+if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F))$p.value <0.05){
+  if(fisher.test(matrix(c(temp_hiv_SS,not_hiv_SS_t,not_hiv_SS,not_not_hiv_SS),ncol=2,byrow = F),alternative = "greater")$p.value <0.05){
+    cat(paste("HIV splicing sites from cluster",i,"are enriched.\n",collapse = " "))
+  }else{
+    cat(paste("HIV splicing sites from cluster",i,"are diminished.\n",collapse = " "))
+  }
+}}
+```
+
+#####Conclusion
+
+HERVs and L1s are enriched, in addition to HIV genes and HIV splicing sites, in cluster 1 but HERVs are diminished in cluster 3. HERVs and L1s are co-expressed with HIV genes and further research on these features needs to be done to understand its regulation and the possible effects the expression of these could have on these samples. Regarding the diminished of HIV splicing sites from cluster2 could be explained with the cluster interpretation, since cluster2 are negatively co-expressed with HIV genes. The absence of HERVs in cluster3 is interesting since HERVs are avoiding this pattern of expression in this experiment. 
+
+####Enrichment/Diminished of HERV families
+
+```{r clusEnriDimi_HERV_2,echo=F, message=FALSE, include=T, cache=F}
+enriched2<-list()
+reduced2<-list()
+
+list_hervs_exrp_2<-rownames(DE_genExpression_2)[rownames(DE_genExpression_2) %in% rownames(cts_h)]
+hervs_expr_2<-as.data.frame(table(sapply(strsplit(list_hervs_exrp_2,split="_"),'[[',1)),row.names = 1)
+total_expr_2<-sum(hervs_expr_2[,1])
+
+for(i in 1:length(unique(clusters))){
+  lhervs_temp<-rownames(DE_genExpression_2)[rownames(DE_genExpression_2) %in% rownames(cts_h) & ploting_clusters_2$clusters == i]
+  cts_temp_group<-as.data.frame(table(sapply(strsplit(lhervs_temp,split="_"),'[[',1)),row.names = 1)
+  tot_temp_group<-sum(cts_temp_group[,1])
+  enriched2[[i]]<-data.frame(row.names = rownames(cts_temp_group),counts=cts_temp_group$Freq,
+                          pvalue=rep(1,length(rownames(cts_temp_group))),FDR=rep(1,length(rownames(cts_temp_group))))
+  reduced2[[i]]<-data.frame(row.names = rownames(cts_temp_group),counts=cts_temp_group$Freq,
+                         pvalue=rep(1,length(rownames(cts_temp_group))),FDR=rep(1,length(rownames(cts_temp_group))))
+  for(j in rownames(cts_temp_group)){
+    not_f<-tot_temp_group-cts_temp_group[j,]
+    not_f_t<-hervs_expr_2[j,]-cts_temp_group[j,]
+    not_not_f<-total_expr_2-not_f-not_f_t-cts_temp_group[j,]
+    enriched2[[i]][j,"pvalue"]<-fisher.test(matrix(c(cts_temp_group[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                            alternative = "g")$p.value
+    reduced2[[i]][j,"pvalue"]<-fisher.test(matrix(c(cts_temp_group[j,],not_f,not_f_t,not_not_f),ncol=2,byrow = F),
+                                           alternative = "l")$p.value
+  }
+  enriched2[[i]]$FDR<-p.adjust(enriched2[[i]]$pvalue,method = "fdr")
+  reduced2[[i]]$FDR<-p.adjust(reduced2[[i]]$pvalue,method = "fdr")
+}
+cat("Enriched:")
+lapply(enriched2, function(x){if (sum(x$FDR<0.1)){
+  return(cbind(x[x$FDR<0.1,],Family=rownames(x)[x$FDR<0.1],
+               Group=as.character(herv_counts[rownames(x)[x$FDR<0.1],"Group"])))}})
+cat("Diminished:")
+lapply(reduced2, function(x){if (sum(x$FDR<0.1)){
+  return(cbind(x[x$FDR<0.1,],Family=rownames(x)[x$FDR<0.1],
+               Group=as.character(herv_counts[rownames(x)[x$FDR<0.1],"Group"])))}})
+
+```
+
+####Gene list enrichment
+
+#####GO Alternative approach
+
+```{r GO_2,echo=F, message=FALSE,warning=FALSE, include=T, cache=F,eval=T,results='asis'}
+
+DE_genExpression3<-DE_genExpression_2[rownames(DE_genExpression_2) %in% rownames(cts_g),]
+ploting_clusters3<-ploting_clusters_2[rownames(ploting_clusters_2) %in% rownames(cts_g),]
+ltable<-list()
+DE_GeneList<-list()
+wcl<-list()
+rec_l<-list()
+rec<-""
+
+for( i in 1:length(unique(clusters))){
+  
+gene_list<-rownames(DE_genExpression3[ploting_clusters3$clusters ==i,])
+DE_GeneList[[i]]<-bitr(unique(sapply(strsplit(gene_list,split = ".",fixed=T),'[[',1)),
+                      fromType = "ENSEMBL",toType = c("ENTREZID"),
+                      OrgDb = org.Hs.eg.db)$ENTREZID
+
+expressed_genes<-rownames(rld_LPI_2)
+expressed_genes_mod<-factor(as.numeric(expressed_genes %in% gene_list))
+names(expressed_genes_mod)<-expressed_genes
+
+
+sampleGOdata <- new("topGOdata", ontology = "BP",allGenes =expressed_genes_mod,
+   nodeSize = 5, annot = annFUN.gene2GO,gene2GO=GOS)
+
+resultweight <- runTest(sampleGOdata, algorithm = "weight01", statistic = "fisher")
+resultclassic <- runTest(sampleGOdata, algorithm = "classic", statistic = "fisher")
+FDR<-resultclassic
+score(FDR)<-p.adjust(score(FDR), method='fdr')
+
+rec<- enrichPathway(gene=DE_GeneList[[i]],organism ='human',
+                 pvalueCutoff = 0.05,qvalueCutoff=0.1,readable=TRUE,universe = universe_2)
+rec_l[[i]]<-rec@result[rec@result$p.adjust<0.1,c("Description","p.adjust","geneID")]
+
+if(length(rec_l[[i]][,1])){
+  fileGO<-paste0("Reactome_cluster_2set_",i,".txt")
+  write.table(rec_l[[i]],file=fileGO,quote=F,sep="\t", row.names = F)
+}
+
+if(sum(score(resultweight)<0.01)){
+  if(sum(score(resultweight)<0.01)>10){
+    gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+           ranksOf = "Classic",topNodes = 10)
+  }else{
+      gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+         ranksOf = "Classic",topNodes = sum(score(resultweight)<0.01))
+  }
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+clusterName<-paste0("Cluster ",i," (",sum(score(resultweight)<0.01)," GOs enriched):")
+print(kable(gtable,format = "pandoc",caption = clusterName,align = "c"))
+cat('\n')
+fileGO<-paste0("GOEnriched_cluster_Weight101_2set_",i,".txt")
+gtable<-GenTable(sampleGOdata, Classic = resultclassic, Weight101=resultweight,orderBy = "Weight101",
+         ranksOf = "Classic",topNodes = sum(score(resultweight)<0.01))
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+write.table(gtable,file=fileGO,quote=F,row.names = F,sep="\t")
+}
+
+if(sum(score(FDR)<0.05)){
+fileGO<-paste0("GOEnriched_cluster_classical_2set_",i,".txt")
+gtable<-GenTable(sampleGOdata, Classic = resultclassic, FDR=FDR, orderBy = "FDR",topNodes = sum(score(FDR)<0.05))
+text<-paste(Definition(GOTERM[gtable$GO.ID]),collapse = " ")
+text<-paste(Term(GOTERM[gtable$GO.ID]),collapse = " ")
+text<-removeWords(text,c(firstup(stopwords("english")),stopwords("english"), "Process", "process", "etc", "regulation", "cell", "positive", "metabolic","response"))
+text<-removePunctuation(text,preserve_intra_word_dashes=T)
+text<-stripWhitespace(text)
+counts_go <- as.data.frame(table(strsplit(text,split = " ")))
+colnames(counts_go)<-c("word","freq")
+wcl[[i]]<-ggwordcloud(words = counts_go$word, freq = counts_go$freq, min.freq = 3,
+            random.order=FALSE,random.color = F, rot.per = 0,
+            colors=brewer.pal(8, "Dark2"), shape="circle", area_corr=T)
+gtable$Term<-select(GO.db,keys=gtable$GO.ID,columns=c("GOID","TERM"))$TERM
+write.table(gtable,file=fileGO,sep="\t",quote=F,row.names = F)
+}
+}
+
+```
+
+#####GO Classical approach
+
+```{r wordcould_GO_2, echo=F,message=FALSE, include=T, eval=T,cache=F,results='asis',fig.height=7.5, fig.width=15}
+plot_grid(ncol=3,plotlist = wcl,labels = 1:length(unique(clusters)))
+```
+
+#####Reactome
+
+
+###### *HIV*
+
+```{r HIV_reactome_2,echo=F, message=FALSE, include=T, eval=T,cache=F}
+cat("Terms:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "HIV")
+                            if(length(cts)){ return(x[cts,"Description"])}})
+cat("Genes:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "HIV")
+                            if(length(cts)){return(
+  unique(unlist(strsplit(paste(as.character(x[cts,"geneID"]), collapse = "/"),split = "/")))) }})
+```
+
+###### *Virus*
+
+```{r virus_reactome_2,echo=F, message=FALSE, include=T,eval=T, cache=F}
+cat("Terms:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "virus|Virus|viral|Viral")
+                            if(length(cts)){ return(x[cts,"Description"])}})
+cat("Genes:")
+lapply(rec_l, function(x){cts<-grep(x$Description,pattern = "virus|Virus|viral|Viral")
+                            if(length(cts)){return(
+  unique(unlist(strsplit(paste(as.character(x[cts,"geneID"]), collapse = "/"),split = "/")))) }})
+```
+
+###### Conclusions
+
+Reactome shows again categories related to HIV and virus. Interestingly cluster3, which represent genes that suffer a negative effect of CTL + Gag positive conditions, has terms enriched of early phase of HIV life cycle. This implies that the genes showed above (NDC1, NUP50, ...) are down-regulated in gag positives and also in the CTL treated, adding these treatments shows show the highest down-regulation. The opposite of this cluster is cluster 5 which has terms enriched for antiviral mechanism by IFN-stimulated genes. Cluster2 shows the positive co-expression of HIV-genes and therefore terms of viral mRNA transcription, translation and viral replication are enriched.  
+
+####General Conclusions (*set1*)
+
+5 different clusters were identified and multiple biological discussions could arise from them. Regarding HERVs and L1s, both features are  enriched in cluster 1 , which stands for a positive co-expression with HIV genes. Additionally to this result, SREBF and TP53 transcription activation, and positive regulation of gene expression of NF-kappaB TF activity were terms enriched in this cluster with reactome and GO alternative approach, respectively. This could implicate that these pathways of gene transcription activation might promote transcription of HERVs and HIV. Further analysis on HERVs promoters could be perform to understand the results. 
+
+#Conclusions
+
+The results presented here show the differences  between experiments, and more biological implications could be implicated. Besides experiments differ some cluster show similar expression patterns, for example cluster 5 and cluster 2 form set1 (1-10) which are the genes co-expressed with HIV genes are similar as clusters 1 and 2 from set2. Both Cluster 2 are negatively co-expressed with HIV-genes and the enrichment analysis of GO alternative approach show similar terms on both clusters. 
+
+#Perspectives
+
+For further understanding the results of these experiments I propose additional bioinformatic analyses for specific clusters. 
+
+HERVs, LI1s:
+
+  - Positional annotations:
+        HERVs could be located intergenic, intronic or part of gene exons
+  - Further characterization of features of interest.
+        Identify the HERV/L1 transcript
+        Analyze some HERV/L1 promoters
+        Potentially HERV aminoacid sequence
+
+Genes:
+
+  - More in depth research:
+        Literature
+  - TF binding sites
+  - Alternative splicing
+  - Isoform usage
+  

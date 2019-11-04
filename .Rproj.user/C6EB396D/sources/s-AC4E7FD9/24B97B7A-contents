@@ -72,9 +72,17 @@ coldata$Group<-factor(paste(coldata$Tissue,coldata$HIV, sep = "_"))
 coldata$Run<-as.factor(coldata$Run)
 
 hist(rowSums(cts_g),breaks = 100)
-cts_g<-cts_g[rowSums(cts_g)>0,]
+cts_g<-cts_g[rowSums(cts_g>0)>2,]
+cts_h<-cts_h[rowSums(cts_h>0)>2,]
 
 boxplot(cts_g)
+
+selected_samples<-grep(colnames(cts_g), pattern="FFPE", value=T, invert=T)[c(-3,-8,-10,-18)]
+
+cts_g<-cts_g[,selected_samples]
+cts_h<-cts_h[,selected_samples]
+cts_g<-cts_g[rowSums(cts_g>0)>2,]
+cts_h<-cts_h[rowSums(cts_h>0)>2,]
 
 
 ```
@@ -85,6 +93,137 @@ Deseq2 input
 dds <- DESeqDataSetFromMatrix(countData = rbind(cts_g, cts_h),
                               colData = coldata,
                               design= ~Group+Run )
+dds<-DESeq(dds)
 
+rld <- rlog(dds, blind=TRUE) # 'regularized log' transformation
+
+```
+
+
+```{r}
+library(pcaExplorer)
+library(ggplot2)
+library(cowplot)
+
+plotPCA_LPI<-function(x,titel="PCA"){
+  ggplot(data=x)+
+  geom_point(aes(x=PC1,y=PC2,colour=HIV, shape=CTL),size=2)+
+  labs(colour="Gag",shape="Treatment")+ 
+  scale_color_manual(values=c("black","red","green"))+
+  scale_shape_discrete(labels=c("CTL", "Mock"))+
+  ggtitle(titel)+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+}
+
+
+
+
+PCA_LPI <- prcomp(t(assay(rld)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:3],HIV=coldata[rownames(PCA_LPI$x),"HIV"],
+                            Tissue=coldata[rownames(PCA_LPI$x),"Tissue"],
+                            Group=coldata[rownames(PCA_LPI$x),"Group"],
+                            Run=coldata[rownames(PCA_LPI$x),"Run"],
+                            Patient=coldata[rownames(PCA_LPI$x),"Patient"])
+
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Group, shape=Tissue),size=4)+
+  #labs(colour="HIV",shape="Tissue")+ 
+  #scale_color_manual(values=c("black","red"))+
+  ggtitle("Genes+HERVs")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+```
+
+Only HERV
+```{r}
+
+temp<-assay(rld)[rownames(cts_h),]
+
+PCA_LPI <- prcomp(t(temp))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:3],HIV=coldata[rownames(PCA_LPI$x),"HIV"],
+                            Tissue=coldata[rownames(PCA_LPI$x),"Tissue"],
+                            Group=coldata[rownames(PCA_LPI$x),"Group"],
+                            Run=coldata[rownames(PCA_LPI$x),"Run"],
+                            Patient=coldata[rownames(PCA_LPI$x),"Patient"])
+
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Group, shape=Tissue),size=4)+
+  #labs(colour="HIV",shape="Tissue")+ 
+  #scale_color_manual(values=c("black","red"))+
+  ggtitle("HERVs")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+```
+
+Differential Expression
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = rbind(cts_g, cts_h),
+                              colData = coldata,
+                              design= ~Tissue+Run )
+dds<-DESeq(dds)
+
+results<-results(dds, name  = "Tissue_Tumor_vs_Normal")
+
+logic<-results[rownames(cts_h),"padj"]<0.05 & abs(results[rownames(cts_h),"log2FoldChange"])>1
+
+logic[is.na(logic)]<-as.logical("FALSE")
+HERV_DE<-rownames(cts_h)[logic]
+
+library("EnhancedVolcano")
+
+EnhancedVolcano(results,
+    lab = rownames(results),
+    x = 'log2FoldChange',
+    y = 'padj',ylim=c(0,4.5),
+    pCutoff=0.05,
+    selectLab=HERV_DE)
+```
+
+
+```{r}
+dist<-dist(t(counts(dds,normalized=T)),method = "euclidean")
+dist<-as.dist(cor(counts(dds,normalized=T),method = "spearman"))
+tree<-hclust(d=dist, method="complete")
+plot(tree)
+```
+
+
+```{r}
+selected_samples<-grep(colnames(cts_g), pattern="FFPE", value=T, invert=T)[c(-3,-8,-10,-18)]
+dds <- DESeqDataSetFromMatrix(countData = rbind(cts_g, cts_h),
+                              colData = coldata[selected_samples,],
+                              design= ~HIV+Run )
+dds<-DESeq(dds)
+results<-results(dds, name  = "HIV_Positive_vs_Negative")
+
+logic<-results[rownames(cts_h),"pvalue"]<0.05 & abs(results[rownames(cts_h),"log2FoldChange"])>1
+
+logic[is.na(logic)]<-as.logical("FALSE")
+HERV_DE<-rownames(results[rownames(cts_h)[logic],])
+
+library("EnhancedVolcano")
+
+EnhancedVolcano(results,
+    lab = rownames(results),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff=0.01)
+    selectLab=HERV_DE)
+
+
+plotCounts(dds,gene = "HERVH_11q22.2", normalized = F, intgroup = "Group")
+
+
+```
+
+```{r}
+library("pheatmap")
+
+pheatmap(counts(dds,normalized=T)[HERV_DE,], scale = "row",border_color = NA, 
+        annotation_col = coldata[,c("HIV","Tissue")])
 
 ```
