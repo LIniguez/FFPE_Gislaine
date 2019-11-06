@@ -1,0 +1,1581 @@
+---
+title: "CircRNA_Latency"
+author: "Luis P Iniguez"
+date: "8/26/2019"
+output:
+  html_document:
+    df_print: paged
+pdf_document: default
+bibliography: bibliography.bib
+---
+
+```{r setup, include=FALSE}
+library("DESeq2") #si
+library("pheatmap") #si
+library("ggplot2") #si
+library("IHW") #si
+library('viridis')
+library("cowplot") #si
+library('knitr')
+library('kableExtra')
+library("RColorBrewer")
+library("ggsignif")
+library("UpSetR") #si
+library("apeglm")
+library("EnhancedVolcano") #si
+library("edgeR")
+library("VennDetail")
+library("reshape2")
+
+setwd("~/Documents/WCM/CircRNA/")
+tr2gn<-read.table("transcript2gene_gencode.v31.txt", col.names = c("Transcript","Gene"), row.names = "Transcript")
+```
+
+
+#CircRNA
+
+##Introduction
+
+Circular RNAs (circRNA) are single stranded covalently closed RNAs, which lack the classical characteristics of linear mRNA such as 5’ cap and 3’ poly A tails.CircRNAs are the product of a “backsplicing”, where the donor splicing site binds with an upstream acceptor, instead of with a downstream acceptor producing a 3ʹ,5ʹ-phosphodiester bond [@Wilusz2018, @Li2018].How are these circRNA form? What about lariat circular RNA? [@CircRNA]
+
+![CircRNA](Figure1.png){ width=75% height=75% }
+
+More than 10,000 circRNAs have been identified in multiple model organisms (details). Some of the have been linked to processes like neuronal functionality, immune responses, aging, cell stability, proliferation and pluripotency.
+
+The most studied function of circRNAs is as microRNA sponges, but these RNA species can also influence gene expression and splicing in cis, can interact with proteins or even be translated due to a ribosome entry sequence. (details as miRNA sponge)
+
+circRNA in viral infections (NF90/NF110 & PKR inactivation).
+
+HIV-1 infection is still one of the world’s most significant infectious diseases, with around 36.7 million people living with HIV-1 at the end of 2017. Only 60% of people living with HIV-1 know that they are infected. While the WHO has recommended a “treat all” approach, so that all people diagnosed with HIV-1 should be started on antiretroviral therapy (ART), around 54% of HIV-1 infected adults and 51% of children worldwide are still not on ART. Since the first case report, 38 years ago, about 40 million people have died of HIV-1 and still there is no accessible cure. The major barrier impeding HIV-1 eradication is a small reservoir of latently infected resting T-cells that persist after ART and can spawn new waves of infection. Many efforts are underway to develop strategies to either block HIV-1 reactivation in these cells or promote their selective elimination. However, we still have a poor understanding of what defines and promotes HIV-1 latency. This is a challenging problem to study in vivo because latently infected cells are exceedingly rare in patients and there are no reliable biomarkers to identify them. In this grant, we propose to apply cutting-edge technologies to test the transformative idea that circRNAs are differentially regulated upon infection and in latently-infected cells, and that they can be harnessed as markers and modulators of HIV-1 latency.
+
+Resume the only paper on HIV and circRNA. 
+
+##Infection Samples
+
+I choose two differet datasets for analyzing HIV-1 infection. Both datasets correspond to early stages of HIV-1 infection (12 and 24 hrs post infection) in SupT1 cells, a human CD4+ T cell line. One of the datasets (Chang) is polyA enriched RNA-seq, while the other is Ribo-. Both dataset tested 4 different conditions; HIV-1 infected 12 and 24 hours post infection and Mock 12 and 24 hours post infection. Additionally, Peng dataset (Ribo-) includes infection with HIV treated with UV as another negative control (12 and 24 hrs post infection). These last conditions were not considered for DE.  
+
+## Mapping and Quantification
+
+All the samples were analyzed with the same methodology. It consists of a mapping all reads with STAR followed by CIRCexplorer2 for circRNA identification. [CLEAR] (https://github.com/YangLab/CLEAR) was used for circRNA quantification. For gene and transcript cuantification stringtie was used under gencode.v31. CircRNA were filtered if less than two backspliced junction reads were found in a single sample. Each sample was run independentlly and after runing Stringtie all gtf were merged. The merged gtf file was used as template for another round of stringtie. SUPPA was used for alternative splicing events identification and quantification. 
+
+##Chang (polyA enriched)
+```{r readChang,echo=F, message=FALSE}
+cts_g_chang <- as.matrix(read.csv("Stringtie_STAR_geneCount_Chang.txt",row.names = 1))
+cts_t_chang <- as.matrix(read.csv("Stringtie_STAR_transcriptCount_Chang.txt",row.names = 1))
+cts_c_chang <- as.matrix(read.delim("circRNA_readcount_Chang.txt",row.names = 1))
+ratio_c_chang <- as.matrix(read.delim("circRNA_relativeexpression_Chang.txt",row.names = 1))
+circ_annotation_chang <- read.table("circRNA_annotation_Chang.txt",
+                                    col.names=c("Chromosome","Start","End","Exons","Type","Gene","Flanking_Introns"))
+circ_annotation_chang$Name<-paste0(circ_annotation_chang$Chromosome,":",
+                                   circ_annotation_chang$Start,"-",circ_annotation_chang$End)
+annotation_chang <- read.table("cuffcompare_Str_STAR_Chang.tracking",
+                               col.names = c("Transcript","Gene","Reference","Class","END"))[,1:4]
+annotation_chang$RefTranscript<-sapply(strsplit(as.character(annotation_chang$Reference),
+                                                split = "|", fixed = T),`[`,2)
+annotation_chang$RefGen<-tr2gn[annotation_chang$RefTranscript,]
+annotation_chang$GeneHasCircRNA<-annotation_chang$RefGen %in% circ_annotation_chang$Gene
+
+circ_genes_chang<-unique(annotation_chang$Gene[annotation_chang$GeneHasCircRNA])
+coldata <- read.delim("sample_annotation_Chang.txt", row.names=1)
+coldata$Group<-factor(paste0(coldata$Status, "_",coldata$Time),
+ levels=c('Uninfected_12','HIV_12','Uninfected_24','HIV_24')) 
+```
+
+Number of CircRNAs found in each Chang's samples:
+
+```{r circNUMChang,echo=F, message=FALSE,fig.height=3, fig.width=4}
+tot_circ<-colSums(cts_c_chang>0)
+other_circ_samp<-colSums(cts_c_chang[rowSums(cts_c_chang>0)>2,]>0)
+unique_circ<-tot_circ-other_circ_samp
+
+dat4ggplot<-data.frame(value=as.numeric(c(unique_circ,other_circ_samp)),Status=coldata$Status,
+      Time=coldata$Time,Group=coldata$Group,
+      Sample=factor(rep(rownames(coldata),2),levels=rownames(coldata)[order(coldata$Group)]),
+      Other=c(rep("no",length(rownames(coldata))),rep("yes",length(rownames(coldata)))))
+
+ggplot(data=dat4ggplot)+
+  geom_bar(aes(x=Sample, y=value, fill=Group,alpha=Other), stat="identity")+
+  labs(alpha="Is expressed in\nother sample?")+
+  ggtitle("PolyA enriched")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+  scale_y_continuous(breaks = 0:15)+
+  xlab("Samples")+ylab("Number of CircRNA")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank())
+
+ggplot(data=dat4ggplot[dat4ggplot$Other=="yes",])+
+  geom_bar(aes(x=Sample, y=value, fill=Group), stat="identity")+
+  ggtitle("Poly-A enriched")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+  scale_y_continuous(breaks = 0:15)+
+  xlab("Samples")+ylab("Number of CircRNA")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank(), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),legend.title = element_text(size=15,face="bold"),
+        axis.title = element_text( size = 15),legend.text = element_text( size = 15))
+
+```
+
+```{r transformcountsChang,echo=F, message=FALSE}
+all <- rbind(cts_g_chang, cts_c_chang)
+group <- as.factor(coldata$Group)
+y <- DGEList(counts=all,group=group)
+design <- model.matrix(~0+group,data = y$samples)
+keep <- filterByExpr(y,design=design)
+keep[rownames(cts_c_chang)]<-TRUE
+y <- y[keep, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+y <- estimateDisp(y,design)
+fit <- glmFit(y,design)
+```
+
+Data filtration (only genes), transformation and normalization was perfomred with edgeR. A general linear moldel was applied to the normalized data. The first two components of the PCA look like this:
+
+```{r PCAallChang,echo=F, message=FALSE,fig.height=3, fig.width=5}
+PCA_LPI <- prcomp(t(cpm(y)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Status=coldata[rownames(PCA_LPI$x),"Status"],
+                            Time=factor(coldata[rownames(PCA_LPI$x),"Time"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Status, shape=Time),size=2)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("red","blue"))+
+  scale_shape_discrete(labels=c("12 hrs", "24 hrs"))+
+  ggtitle("Gene Count + circRNA")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+```
+
+The PCA of only circRNA looks like this:
+
+```{r PCAcircChang,echo=F, message=FALSE,fig.height=3, fig.width=5}
+PCA_LPI <- prcomp(t(cpm(y)[circ_annotation_chang$Name,]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Status=coldata[rownames(PCA_LPI$x),"Status"],
+                            Time=factor(coldata[rownames(PCA_LPI$x),"Time"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Status, shape=Time),size=2)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("red","blue"))+
+  scale_shape_discrete(labels=c("12 hrs", "24 hrs"))+
+  ggtitle("Only circRNA")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+```
+
+For calculating DE we fit a negative binomial generalized log-linear model to the read counts for each gene with the glmLRT function from edgeR. Three comparisons were made:
+
+* Uninfected 12 hrs vs HIV 12 hrs
+* HIV 12 hrs vs HIV 24 hrs
+* Uninfected 24 hrs vs HIV 24 hrs
+
+```{r DEChang,echo=F, message=FALSE}
+lrt <- glmLRT(fit,contrast=c(-1,1,0,0))
+top4_U12vsH12_chang <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U12vsH12_chang
+DE_U12vsH12_chang<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #358
+
+lrt <- glmLRT(fit,contrast=c(0,-1,0,1))
+top4_H12vsH24_chang <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_H12vsH24_chang
+DE_H12vsH24_chang<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #30820
+
+lrt <- glmLRT(fit,contrast=c(0,0,-1,1))
+top4_U24vsH24_chang <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U24vsH24_chang
+DE_U24vsH24_chang<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #26963
+```
+
+Volcano plots :)
+
+```{r VolcChang1,echo=F, message=FALSE,fig.height=8, fig.width=15}
+volcdata_circ<-top4_U24vsH24_chang$table[rownames(top4_U24vsH24_chang$table) %in% rownames(cts_c_chang),]
+volcdata_NOTcirc<-top4_U24vsH24_chang$table[!(rownames(top4_U24vsH24_chang$table) %in% rownames(cts_c_chang)),]
+a<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,2),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+a1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_H12vsH24_chang$table[rownames(top4_H12vsH24_chang$table) %in% rownames(cts_c_chang),]
+volcdata_NOTcirc<-top4_H12vsH24_chang$table[!(rownames(top4_H12vsH24_chang$table) %in% rownames(cts_c_chang)),]
+b<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,3.5),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+b1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_U12vsH12_chang$table[rownames(top4_U12vsH12_chang$table) %in% rownames(cts_c_chang),]
+volcdata_NOTcirc<-top4_U12vsH12_chang$table[!(rownames(top4_U12vsH12_chang$table) %in% rownames(cts_c_chang)),]
+c<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,2),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+c1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+plot_grid(ncol=3,plotlist = list(a,b,c,a1,b1,c1), labels=c("circRNA Uninfected 24 hrs vs HIV 24 hrs","circRNA HIV 12 hrs vs HIV 24 hrs","circRNA Uninfected 12 hrs vs HIV 12 hrs","Genes Uninfected 24 hrs vs HIV 24 hrs","Genes HIV 12 hrs vs HIV 24 hrs","Genes Uninfected 24 hrs vs HIV 24 hrs"),label_x=0,hjust=0)
+
+```
+
+The differentially expressed features in numbers:
+
+```{r TableChang,echo=F, message=FALSE}
+cU24vsH24_up_chang<-sum(DE_U24vsH24_chang[rownames(DE_U24vsH24_chang) %in% rownames(cts_c_chang),1]>0)
+cU24vsH24_down_chang<-sum(DE_U24vsH24_chang[rownames(DE_U24vsH24_chang) %in% rownames(cts_c_chang),1]<0)
+gU24vsH24_up_chang<-sum(DE_U24vsH24_chang[!(rownames(DE_U24vsH24_chang) %in% rownames(cts_c_chang)),1]>0)
+gU24vsH24_down_chang<-sum(DE_U24vsH24_chang[!(rownames(DE_U24vsH24_chang) %in% rownames(cts_c_chang)),1]<0)
+
+cH12vsH24_up_chang<-sum(DE_H12vsH24_chang[rownames(DE_H12vsH24_chang) %in% rownames(cts_c_chang),1]>0)
+cH12vsH24_down_chang<-sum(DE_H12vsH24_chang[rownames(DE_H12vsH24_chang) %in% rownames(cts_c_chang),1]<0)
+gH12vsH24_up_chang<-sum(DE_H12vsH24_chang[!(rownames(DE_H12vsH24_chang) %in% rownames(cts_c_chang)),1]>0)
+gH12vsH24_down_chang<-sum(DE_H12vsH24_chang[!(rownames(DE_H12vsH24_chang) %in% rownames(cts_c_chang)),1]<0)
+
+cU12vsH12_up_chang<-sum(DE_U12vsH12_chang[rownames(DE_U12vsH12_chang) %in% rownames(cts_c_chang),1]>0)
+cU12vsH12_down_chang<-sum(DE_U12vsH12_chang[rownames(DE_U12vsH12_chang) %in% rownames(cts_c_chang),1]<0)
+gU12vsH12_up_chang<-sum(DE_U12vsH12_chang[!(rownames(DE_U12vsH12_chang) %in% rownames(cts_c_chang)),1]>0)
+gU12vsH12_down_chang<-sum(DE_U12vsH12_chang[!(rownames(DE_U12vsH12_chang) %in% rownames(cts_c_chang)),1]<0)
+
+temp<-data.frame(Test=c(rep("Uninfected 24 hrs vs HIV 24 hrs",2), rep("HIV 12 hrs vs HIV 24 hrs",2),
+                  rep("Uninfected 12 hrs vs HIV 12 hrs",2)),
+          Feature=rep(c("CircRNA","Gene"),3),
+          Downregulated=c(cU24vsH24_down_chang,gU24vsH24_down_chang,
+                          cH12vsH24_down_chang,gH12vsH24_down_chang,
+                          cU12vsH12_down_chang, gU12vsH12_down_chang),
+          Upregulated=c(cU24vsH24_up_chang,gU24vsH24_up_chang,
+                        cH12vsH24_up_chang,gH12vsH24_up_chang,
+                        cU12vsH12_up_chang, gU12vsH12_up_chang))
+kable(temp, aling="c",floating.environment="sidewaystable") %>% 
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+The circRNA differentially expressed look like this (first row shows circRNA expression, second row shows the gene expression from the aboved plotted circRNA, and in last line shows the ratio of circRNA-linearRNA based on junction coverage):
+
+```{r exampleChang,echo=F, message=FALSE,fig.height=8, fig.width=10}
+temp<-unique(c(rownames(DE_U24vsH24_chang), rownames(DE_H12vsH24_chang),rownames(DE_U12vsH12_chang)))
+
+cout<-list()
+gout<-list()
+rout<-list()
+
+for (i in temp[temp %in% rownames(cts_c_chang)]){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_chang[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_chang$Gene[grepl(circ_annotation_chang$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_chang$Gene[grep(annotation_chang$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_chang$Reference[grep(annotation_chang$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(!is.null(cpm(y)[gtmpmap,])){
+    ptmp2<-cpm(y)[gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+  cout[[i]]<-ggplot(ptmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+
+
+plot_grid(ncol=3,plotlist = c(cout,gout,rout))
+
+
+```
+
+Despite the sequencing methodology circRNAs could be found in these samples and some circRNAs are differentially expressed in the conditions tested. It is important to mention that circRNA POLR2A has been reported to be downregulated upon poly(I:C), a compund widely used to mimic pathogenic dsRNAs or viral infection. circRNA HDAC4 has also been reported as circRNA These validates the identification and DE analysis. 
+
+##Peng (Ribo-)
+```{r readPeng,echo=F, message=FALSE,}
+cts_g_Peng <- as.matrix(read.csv("Stringtie_STAR_geneCount_Peng.txt",row.names = 1))
+cts_t_Peng <- as.matrix(read.csv("Stringtie_STAR_transcriptCount_Peng.txt",row.names = 1))
+cts_c_Peng <- as.matrix(read.delim("circRNA_readcount_Peng.txt",row.names = 1))
+ratio_c_Peng <- as.matrix(read.delim("circRNA_relativeexpression_Peng.txt",row.names = 1))
+circ_annotation_Peng <- read.table("circRNA_annotation_Peng.txt",
+                                    col.names=c("Chromosome","Start","End","Exons","Type","Gene","Flanking_Introns"))
+circ_annotation_Peng$Name<-paste0(circ_annotation_Peng$Chromosome,":",
+                                   circ_annotation_Peng$Start,"-",circ_annotation_Peng$End)
+annotation_Peng <- read.table("cuffcompare_Str_STAR_Peng.tracking",
+                               col.names = c("Transcript","Gene","Reference","Class","END"))[,1:4]
+annotation_Peng$RefTranscript<-sapply(strsplit(as.character(annotation_Peng$Reference),
+                                                split = "|", fixed = T),`[`,2)
+annotation_Peng$RefGen<-tr2gn[annotation_Peng$RefTranscript,]
+annotation_Peng$GeneHasCircRNA<-annotation_Peng$RefGen %in% circ_annotation_Peng$Gene
+
+circ_genes_Peng<-unique(annotation_Peng$Gene[annotation_Peng$GeneHasCircRNA])
+coldata <- read.delim("sample_annotation_Peng.txt", row.names=1)
+coldata$Group<-factor(paste0(coldata$Status, "_",coldata$Time),
+ levels=c('Uninfected_12','UV_HIV_12','HIV_12','Uninfected_24','UV_HIV_24','HIV_24'))
+coldata$Time<-factor(coldata$Time, levels=c("12","24"))
+AS_Peng<-read.table("PSI_events_Peng.psi")
+temp<-strsplit(rownames(AS_Peng),";")
+ann_AS_Peng<-data.frame(Gene=sapply(temp,'[[',1), AS=sapply(temp,function(x){strsplit(x[2],":")[[1]][1]}),
+                        row.names = rownames(AS_Peng))
+
+```
+
+These samples come from total RNA-seq, In brief, ribosomal RNAs (rRNAs) were depleted and bystanders RNAs were fragmented, and cDNA synthesis was primed using random hexamers. The number of circRNAs found in comparison to the Chang dataset is considerable higher:
+
+```{r circNUMPeng,echo=F, message=FALSE,fig.height=3, fig.width=4}
+tot_circ<-colSums(cts_c_Peng>0)
+other_circ_samp<-colSums(cts_c_Peng[rowSums(cts_c_Peng>0)>2,]>0)
+unique_circ<-tot_circ-other_circ_samp
+
+dat4ggplot<-data.frame(value=as.numeric(c(unique_circ,other_circ_samp)),Status=coldata$Status,
+      Time=coldata$Time,Group=coldata$Group,
+      Sample=factor(rep(rownames(coldata),2),levels=rownames(coldata)[order(coldata$Group)]),
+      Other=c(rep("no",length(rownames(coldata))),rep("yes",length(rownames(coldata)))))
+dat4ggplot<-dat4ggplot[!grepl(dat4ggplot$Group,pattern="UV"),]
+
+ggplot(data=dat4ggplot)+
+  geom_bar(aes(x=Sample, y=value, fill=Group,alpha=Other), stat="identity")+
+  labs(alpha="Is expressed in\nother sample?")+
+  ggtitle("Total RNA")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+  xlab("Samples")+ylab("Number of CircRNA")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank())
+
+
+ggplot(data=dat4ggplot[dat4ggplot$Other=="yes",])+
+  geom_bar(aes(x=Sample, y=value, fill=Group), stat="identity")+
+  ggtitle("Total RNA")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+  #scale_y_continuous(breaks = 0:15)+
+  xlab("Samples")+ylab("Number of CircRNA")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank(), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),legend.title = element_text(size=15,face="bold"),
+        axis.title = element_text( size = 15),legend.text = element_text( size = 15))
+
+```
+
+```{r transformcountsPeng,echo=F, message=FALSE,}
+all <- rbind(cts_g_Peng, cts_c_Peng)
+all_t<- rbind(cts_t_Peng, cts_c_Peng)
+group <- as.factor(coldata$Group)
+y <- DGEList(counts=all,group=group)
+y2 <- DGEList(counts=all_t,group=group)
+design <- model.matrix(~0+group,data = y$samples)
+keep <- filterByExpr(y,design=design)
+keep2 <- filterByExpr(y2,design=design)
+keep[rownames(cts_c_Peng)]<-TRUE
+keep2[rownames(cts_c_Peng)]<-TRUE
+y <- y[keep, , keep.lib.sizes=FALSE]
+y2 <- y2[keep2, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+y2 <- calcNormFactors(y2)
+y <- estimateDisp(y,design)
+y2 <- estimateDisp(y2,design)
+fit <- glmFit(y,design)
+fit2 <- glmFit(y2,design)
+```
+
+Principal component analysis of Genes + circRNAs:
+
+```{r PCAallPeng,echo=F, message=FALSE,fig.height=3, fig.width=5}
+PCA_LPI <- prcomp(t(cpm(y)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Status=coldata[rownames(PCA_LPI$x),"Status"],
+                            Time=coldata[rownames(PCA_LPI$x),"Time"],Group=coldata[rownames(PCA_LPI$x),"Group"])
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Status, shape=Time),size=2)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("red","blue","green"))+
+  scale_shape_discrete(labels=c("12 hrs", "24 hrs"))+
+  ggtitle("Gene Count + circRNA")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+```
+
+circRNAs PCA:
+
+```{r PCAcircPeng,echo=F, message=FALSE,fig.height=3, fig.width=5}
+PCA_LPI <- prcomp(t(cpm(y)[circ_annotation_Peng$Name,]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Status=coldata[rownames(PCA_LPI$x),"Status"],
+                            Time=factor(coldata[rownames(PCA_LPI$x),"Time"]),Group=coldata[rownames(PCA_LPI$x),"Group"])
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Status, shape=Time),size=2)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("red","blue","green"))+
+  scale_shape_discrete(labels=c("12 hrs", "24 hrs"))+
+  ggtitle("Only circRNA")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+```
+
+Same comparisons as with Chang were calculated. And the volcano plots look like this:
+
+```{r DEPeng,echo=F, message=FALSE}
+lrt <- glmLRT(fit,contrast=c(-1,0,1,0,0,0))
+top4_U12vsH12_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U12vsH12_Peng
+DE_U12vsH12_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #218
+lrt <- glmLRT(fit2,contrast=c(-1,0,1,0,0,0))
+top4_U12vsH12_tra_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U12vsH12_tra_Peng
+DE_U12vsH12_tra_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #150
+
+lrt <- glmLRT(fit,contrast=c(0,0,-1,0,0,1))
+top4_H12vsH24_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_H12vsH24_Peng
+DE_H12vsH24_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #3902
+lrt <- glmLRT(fit2,contrast=c(0,0,-1,0,0,1))
+top4_H12vsH24_tra_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_H12vsH24_tra_Peng
+DE_H12vsH24_tra_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #3399
+
+lrt <- glmLRT(fit,contrast=c(0,0,0,-1,0,1))
+top4_U24vsH24_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U24vsH24_Peng
+DE_U24vsH24_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #8566
+lrt <- glmLRT(fit2,contrast=c(0,0,0,-1,0,1))
+top4_U24vsH24_tra_Peng <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_U24vsH24_tra_Peng
+DE_U24vsH24_tra_Peng<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #8300
+
+```
+
+```{r VolcPeng1,echo=F, message=FALSE,fig.height=8, fig.width=15}
+volcdata_circ<-top4_U24vsH24_Peng$table[rownames(top4_U24vsH24_Peng$table) %in% rownames(cts_c_Peng),]
+volcdata_NOTcirc<-top4_U24vsH24_Peng$table[!(rownames(top4_U24vsH24_Peng$table) %in% rownames(cts_c_Peng)),]
+a<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,4),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+a1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_H12vsH24_Peng$table[rownames(top4_H12vsH24_Peng$table) %in% rownames(cts_c_Peng),]
+volcdata_NOTcirc<-top4_H12vsH24_Peng$table[!(rownames(top4_H12vsH24_Peng$table) %in% rownames(cts_c_Peng)),]
+b<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,4),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+b1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_U12vsH12_Peng$table[rownames(top4_U12vsH12_Peng$table) %in% rownames(cts_c_Peng),]
+volcdata_NOTcirc<-top4_U12vsH12_Peng$table[!(rownames(top4_U12vsH12_Peng$table) %in% rownames(cts_c_Peng)),]
+c<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,4),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+c1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+plot_grid(ncol=3,plotlist = list(a,b,c,a1,b1,c1), labels=c("Uninfected 24 hrs vs HIV 24 hrs","HIV 12 hrs vs HIV 24 hrs","Uninfected 12 hrs vs HIV 12 hrs","Genes Uninfected 24 hrs vs HIV 24 hrs","Genes HIV 12 hrs vs HIV 24 hrs","Genes Uninfected 24 hrs vs HIV 24 hrs"),label_x=0,hjust=0)
+
+```
+
+```{r TablePeng,echo=F, message=FALSE}
+cU24vsH24_up_Peng<-sum(DE_U24vsH24_Peng[rownames(DE_U24vsH24_Peng) %in% rownames(cts_c_Peng),1]>0)
+cU24vsH24_down_Peng<-sum(DE_U24vsH24_Peng[rownames(DE_U24vsH24_Peng) %in% rownames(cts_c_Peng),1]<0)
+gU24vsH24_up_Peng<-sum(DE_U24vsH24_Peng[!(rownames(DE_U24vsH24_Peng) %in% rownames(cts_c_Peng)),1]>0)
+gU24vsH24_down_Peng<-sum(DE_U24vsH24_Peng[!(rownames(DE_U24vsH24_Peng) %in% rownames(cts_c_Peng)),1]<0)
+
+cH12vsH24_up_Peng<-sum(DE_H12vsH24_Peng[rownames(DE_H12vsH24_Peng) %in% rownames(cts_c_Peng),1]>0)
+cH12vsH24_down_Peng<-sum(DE_H12vsH24_Peng[rownames(DE_H12vsH24_Peng) %in% rownames(cts_c_Peng),1]<0)
+gH12vsH24_up_Peng<-sum(DE_H12vsH24_Peng[!(rownames(DE_H12vsH24_Peng) %in% rownames(cts_c_Peng)),1]>0)
+gH12vsH24_down_Peng<-sum(DE_H12vsH24_Peng[!(rownames(DE_H12vsH24_Peng) %in% rownames(cts_c_Peng)),1]<0)
+
+cU12vsH12_up_Peng<-sum(DE_U12vsH12_Peng[rownames(DE_U12vsH12_Peng) %in% rownames(cts_c_Peng),1]>0)
+cU12vsH12_down_Peng<-sum(DE_U12vsH12_Peng[rownames(DE_U12vsH12_Peng) %in% rownames(cts_c_Peng),1]<0)
+gU12vsH12_up_Peng<-sum(DE_U12vsH12_Peng[!(rownames(DE_U12vsH12_Peng) %in% rownames(cts_c_Peng)),1]>0)
+gU12vsH12_down_Peng<-sum(DE_U12vsH12_Peng[!(rownames(DE_U12vsH12_Peng) %in% rownames(cts_c_Peng)),1]<0)
+
+temp<-data.frame(Test=c(rep("Uninfected 24 hrs vs HIV 24 hrs",2), rep("HIV 12 hrs vs HIV 24 hrs",2),
+                  rep("Uninfected 12 hrs vs HIV 12 hrs",2)),
+          Feature=rep(c("CircRNA","Gene"),3),
+          Downregulated=c(cU24vsH24_down_Peng,gU24vsH24_down_Peng,
+                          cH12vsH24_down_Peng,gH12vsH24_down_Peng,
+                          cU12vsH12_down_Peng, gU12vsH12_down_Peng),
+          Upregulated=c(cU24vsH24_up_Peng,gU24vsH24_up_Peng,
+                        cH12vsH24_up_Peng,gH12vsH24_up_Peng,
+                        cU12vsH12_up_Peng, gU12vsH12_up_Peng))
+kable(temp, aling="c",floating.environment="sidewaystable") %>% 
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+It is worth to point out that the majoirty of the circRNAs are downregulated after 24 hours of HIV infection, as reported after viral infection. It will be very intersting to look at different time points in CD4+ T cells. HIV life cycle takes aprox. 24 hrs. 
+
+The DE circRNAs heatmap looks like this:
+
+```{r heatmapPeng,echo=F, message=FALSE,fig.height=5, fig.width=4}
+temp<-unique(c(rownames(DE_U24vsH24_Peng), rownames(DE_H12vsH24_Peng),rownames(DE_U12vsH12_Peng)))
+
+x<-c("lightgrey","darkgray")
+names(x)<-levels(coldata$Time)
+ann_colors<- list(hpi = x,Infection = c(HIV = "red", Uninfected = "deepskyblue"))
+selected_samp<-rownames(coldata)[!grepl(coldata$Group, pattern="UV" )]
+subset_coldata<-coldata[selected_samp,c(1,2)]
+colnames(subset_coldata)<-c("Infection","hpi")
+heat1<-pheatmap(cpm(y)[temp[temp %in% rownames(cts_c_Peng)],selected_samp],annotation_col = subset_coldata, show_rownames = T, color = viridis(50,begin = 1,end=0),border_color = NA, scale="row",clustering_distance_cols = "correlation",clustering_method = "ward.D",cutree_rows = 4,annotation_colors=ann_colors, show_colnames = F)
+```
+
+```{r}
+circDE<-as.character(temp[temp %in% rownames(cts_c_Peng)])
+circDE<-circDE[heat1$tree_row$order]
+genExpr_circDE<-t(sapply(circDE,
+  function(x){
+    gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+    if(length(gtmpmap[keep[gtmpmap]])>1){
+     tmp_out<-colSums(cpm(y)[gtmpmap[keep[gtmpmap]],])
+    }else if(length(gtmpmap[keep[gtmpmap]])){tmp_out<-cpm(y)[gtmpmap[keep[gtmpmap]],]
+    }else {tmp_out<-rep(0,length(colnames(cpm(y))))}
+    tmp_out
+  }
+))
+
+#genExpr_circDE<-genExpr_circDE[sort(rownames(genExpr_circDE)),]
+tem4names<-circ_annotation_Peng[circ_annotation_Peng$Name %in% rownames(genExpr_circDE),]
+rownames(tem4names)<-tem4names$Name
+tem4names<-tem4names[rownames(genExpr_circDE),]
+rownames(genExpr_circDE)<-tem4names$Gene
+
+genExpr_circDE<-genExpr_circDE[rowSums(genExpr_circDE)>0,]
+pheatmap(genExpr_circDE[,selected_samp],annotation_col = subset_coldata, show_rownames = T, color = viridis(50,begin = 1,end=0),border_color = NA, scale="row",clustering_distance_cols = "correlation",clustering_method = "ward.D",cluster_rows = F,annotation_colors=ann_colors, show_colnames = F)
+
+```
+
+
+The 3 most significativly DE circRNAs:
+
+```{r examplePeng1,echo=F, message=FALSE,fig.height=8, fig.width=10}
+temp<-rbind(DE_U24vsH24_Peng,DE_H12vsH24_Peng,DE_U12vsH12_Peng)
+temp_circ<-temp[rownames(temp)%in% rownames(cts_c_Peng),]
+temp_circ<-temp_circ[order(temp_circ$FDR),]
+
+cout<-list()
+gout<-list()
+rout<-list()
+
+selected_samp<-rownames(coldata)[!grepl(coldata$Group, pattern="UV" )]
+
+for (i in rownames(temp_circ)[1:3]){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Peng[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_Peng$Reference[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(sum(rownames(cpm(y)) %in% gtmpmap)){
+    ptmp2<-cpm(y)[rownames(cpm(y)) %in% gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+
+  cout[[i]]<-ggplot(ptmp[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+
+
+plot_grid(ncol=3,plotlist = c(cout,gout,rout))
+
+```
+
+First circRNA (MIB1) is DE between Uninfected 24 hrs vs HIV 24 hrs and the expression of that circRNA could be derived by an increase in gene transcription (second row). Nevetheless, the rest of them present opocite patterns; circRNA is overexpressed upon HIV infection but gene expression has a tendency of being underexpressed, therfore the ratio circRNA/linearRNA rises.
+
+####RNASEH2B
+
+Human RNaseH2 (hRNaseH2) is an enzyme complex consisting of three subunits, all of which are required for enzyme function. RNASEH2A, the catalytic subunit and the subunits RNASEH2B and RNASEH2C. Mutations in the subunits cause Aicardi-Goutier syndrome, a recessive genetic disorder which mimics congenital viral infection. The whole complex is essential for *HIV replication* (Genovesio et al. 2011). CircRNA in this protein has been reported. 
+
+
+####ASXL1
+
+Transcriptional regulator 1, part of the Polycomb group of proteins. Mutations in this gene are associated with myelodysplastic syndromes and chronic myelomonocytic leukemia. CircRNA is reported for this gene. 
+
+
+
+```{r}
+geneofinterest<-c("XLOC_004690","XLOC_035336","XLOC_020271","XLOC_027607","XLOC_023824")
+geneofinterest2 <-"XLOC_035336"
+circofinterst<-"chr5:69174876-69175537"
+```
+
+The next question is if a circRNA is differentially expressed while its containig gene is also DE but in oppocite way?
+
+```{r indeepthPeng,echo=F, message=FALSE,fig.height=8, fig.width=15}
+
+temp<-rbind(DE_U24vsH24_Peng,DE_H12vsH24_Peng,DE_U12vsH12_Peng)
+temp_circ<-temp[rownames(temp)%in% rownames(cts_c_Peng),]
+temp_circ<-temp_circ[order(temp_circ$FDR),]
+
+U24vsH24_relation_Peng<-t(sapply(rownames(DE_U24vsH24_Peng[rownames(DE_U24vsH24_Peng)%in% rownames(cts_c_Peng),]),
+  function(x,data=DE_U24vsH24_Peng){
+    gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+H12vsH2_relation_Peng<-t(sapply(rownames(DE_H12vsH24_Peng[rownames(DE_H12vsH24_Peng)%in% rownames(cts_c_Peng),]),
+  function(x,data=DE_H12vsH24_Peng){
+    gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+U12vsH12_relation_Peng<-t(sapply(rownames(DE_U12vsH12_Peng[rownames(DE_U12vsH12_Peng)%in% rownames(cts_c_Peng),]),
+  function(x,data=DE_U12vsH12_Peng){
+    gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+
+opp<-rownames(U24vsH24_relation_Peng[grepl(U24vsH24_relation_Peng[,1],pattern="up|down") & U24vsH24_relation_Peng[,1] != U24vsH24_relation_Peng[,2],])
+same<-rownames(U24vsH24_relation_Peng[grepl(U24vsH24_relation_Peng[,1],pattern="up|down") & U24vsH24_relation_Peng[,1] == U24vsH24_relation_Peng[,2],])
+same2<-rownames(H12vsH2_relation_Peng[grepl(H12vsH2_relation_Peng[,1],pattern="up|down") & H12vsH2_relation_Peng[,1] == H12vsH2_relation_Peng[,2],])
+
+ALV<-sapply(rownames(temp_circ),
+  function(x){
+    gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(ann_AS_Peng$Gene %in% gtmpmap)){
+    data.frame(ann_AS_Peng[ann_AS_Peng$Gene %in% gtmpmap,],circ=x)
+    }
+  }
+)
+aver<-rbind(U24vsH24_relation_Peng,U12vsH12_relation_Peng,H12vsH2_relation_Peng)
+
+H12vsH2_relation_Peng["chr11:130260855-130261929",]
+
+cout<-list()
+gout<-list()
+rout<-list()
+
+for (i in opp){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Peng[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_Peng$Gene[grepl(circ_annotation_Peng$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_Peng$Gene[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_Peng$Reference[grep(annotation_Peng$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(sum(rownames(cpm(y)) %in% gtmpmap)){
+    ptmp2<-cpm(y)[rownames(cpm(y)) %in% gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+
+  cout[[i]]<-ggplot(ptmp[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2[selected_samp,],aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+
+
+plot_grid(ncol=5,plotlist = c(cout,gout,rout))
+
+
+```
+
+
+####SFMBT2
+
+* Transcriptional repressor of HOXB13 gene
+* negatively regulates cell migration and invasion in prostate cancer cells.
+* regulates SOX9
+* circRNA reported
+
+####ZFAND6
+
+* Involved in regulation of TNF-alpha
+* Represses NFκB 
+* circRNA reported
+
+####NFAT5
+
+* circRNA reported
+* The product of this gene is a member of the nuclear factors of activated T cells family of transcription factors. Proteins belonging to this family play a central role in inducible gene transcription during the immune response
+* Interacts with HIV-1 Nef Vpu 
+* NRON is a long non coding RNA repressor of NFAT; levels of NRON are reduced by Nef and increased laeter by Vpu. . Therfore Nef anv Vpu modulate NFAT activity through NRON. NRON regulates negatively NFAT5 by inhibiting their import to cytoplasm. 
+* the most evolutionarily divergent NFAT protein
+* NFAT5 functionally interacts with a specific enhancer binding site conserved in HIV-1, HIV-2, and multiple simian immunodeficiency viruses
+* the replication of three major HIV-1 viral subtypes (B, C, and E) is dependent upon NFAT5 in human primary differentiated macrophages
+
+####TIAM1
+* circRNA reported
+* This gene thus regulates RAC1 signaling pathways that affect cell shape, migration, adhesion, growth, survival, and polarity, as well as influencing actin cytoskeletal formation, endocytosis, and membrane trafficking
+*  Env-mediated cell-cell fusion, virus-cell fusion and HIV-1 infection are dependent on Tiam-1
+
+####DYRK1A
+* DYRK1A Controls HIV-1 Replication at a Transcriptional Level in an NFAT Dependent Manner
+* Downregulation or inhibition of DYRK1A increased LTR-driven transcription and viral replication in cell lines and primary PBMC
+* DYRK1A regulates HIV-1 transcription via the Nuclear Factor of Activated T-cells (NFAT) by promoting its translocation from the nucleus to the cytoplasm
+
+###Conclusion
+
+Results here suggest a relationship between HIV-1 and circRNA which needs to be further explored. 
+
+
+
+##Latency
+
+###Samples
+
+Bosque HIV latency model. 4 Donors and 4 conditions, HIV infected resting and reactivated as well as Mock resting and reactivated. 
+
+###Bosque Model
+
+```{r readBosque,echo=F, message=FALSE}
+cts_g_Bosque <- as.matrix(read.csv("Stringtie_STAR_geneCount_Bosque.txt",row.names = 1))
+cts_t_Bosque <- as.matrix(read.csv("Stringtie_STAR_transcriptCount_Bosque.txt",row.names = 1))
+cts_c_Bosque <- as.matrix(read.delim("circRNA_readcount_Bosque.txt",row.names = 1))
+ratio_c_Bosque <- as.matrix(read.delim("circRNA_relativeexpression_Bosque.txt",row.names = 1))
+circ_annotation_Bosque <- read.table("circRNA_annotation_Bosque.txt",
+                                    col.names=c("Chromosome","Start","End","Exons","Type","Gene","Flanking_Introns"))
+circ_annotation_Bosque$Name<-paste0(circ_annotation_Bosque$Chromosome,":",
+                                   circ_annotation_Bosque$Start,"-",circ_annotation_Bosque$End)
+annotation_Bosque <- read.table("cuffcompare_Str_STAR_Bosque.tracking",
+                               col.names = c("Transcript","Gene","Reference","Class","END"))[,1:4]
+annotation_Bosque$RefTranscript<-sapply(strsplit(as.character(annotation_Bosque$Reference),
+                                                split = "|", fixed = T),`[`,2)
+annotation_Bosque$RefGen<-tr2gn[annotation_Bosque$RefTranscript,]
+annotation_Bosque$GeneHasCircRNA<-annotation_Bosque$RefGen %in% circ_annotation_Bosque$Gene
+
+circ_genes_Bosque<-unique(annotation_Bosque$Gene[annotation_Bosque$GeneHasCircRNA])
+coldata <- read.delim("sample_annotation_Bosque.txt", row.names=1)
+coldata$Group<-factor(paste0(coldata$Infection, "_",coldata$Activation),
+ levels=c('Uninfected_Resting','HIV_Resting','Uninfected_Activated','HIV_Activated'))
+
+```
+
+```{r transformcountsBosque,readBosque,echo=F, message=FALSE}
+all <- rbind(cts_g_Bosque, cts_c_Bosque)
+group <- as.factor(coldata$Group)
+donor <- as.factor(coldata$Donor)
+y <- DGEList(counts=all,group=group)
+y2 <- DGEList(counts=cts_t_Bosque,group=group)
+design <- model.matrix(~0+group+donor,data = y$samples)
+keep <- filterByExpr(y,design=design)
+keep2 <- filterByExpr(y2,design=design)
+keep[rownames(cts_c_Bosque)]<-TRUE
+y <- y[keep, , keep.lib.sizes=FALSE]
+y2 <- y2[keep2, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+y2 <- calcNormFactors(y2)
+y <- estimateDisp(y,design)
+y2 <- estimateDisp(y2,design)
+fit <- glmFit(y,design)
+fit2 <- glmFit(y2,design)
+```
+
+This is the number of expressed genes found in each sample vs circRNA identified
+
+```{r circNUMBosque,echo=F, message=FALSE,fig.height=3, fig.width=8}
+tot_circ<-colSums(cts_c_Bosque>0)
+other_circ_samp<-colSums(cts_c_Bosque[rowSums(cts_c_Bosque>0)>2,]>0)
+unique_circ<-tot_circ-other_circ_samp
+
+tot_genes<-colSums(y$counts>0)
+other_genes_samp<-colSums(y$counts[rowSums(y$counts>0)>2,]>0)
+unique_genes<-tot_genes-other_genes_samp
+
+
+dat4ggplot<-data.frame(value=as.numeric(c(unique_circ,other_circ_samp)),Infection=coldata$Infection,
+      Activation=coldata$Activation,Group=coldata$Group,
+      Sample=factor(rep(rownames(coldata),2),levels=rownames(coldata)[order(coldata$Group)]),
+      Other=c(rep("no",length(rownames(coldata))),rep("yes",length(rownames(coldata)))))
+dat4ggplot2<-data.frame(value=as.numeric(c(unique_genes,other_genes_samp)),Infection=coldata$Infection,
+      Activation=coldata$Activation,Group=coldata$Group,
+      Sample=factor(rep(rownames(coldata),2),levels=rownames(coldata)[order(coldata$Group)]),
+      Other=c(rep("no",length(rownames(coldata))),rep("yes",length(rownames(coldata)))))
+
+
+a<-ggplot(data=dat4ggplot)+
+  geom_bar(aes(x=Sample, y=value, fill=Group,alpha=Other), stat="identity")+
+  labs(alpha="Is expressed in\nother sample?")+
+  ggtitle("Number of circRNA")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c('Latent Uninfected','Latent HIV','Latent Uninfected Reactivated','Latent HIV Reactivated'))+
+  xlab("Samples")+ylab("Number of CircRNA")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank())
+ggplot(data=dat4ggplot[dat4ggplot$Other=="yes",])+
+  geom_bar(aes(x=Sample, y=value, fill=Group), stat="identity")+
+  ggtitle("CircRNA")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c('Latent Uninfected','Latent HIV','Latent Uninfected Reactivated','Latent HIV Reactivated'))+
+  xlab("Samples")+ylab("Number of Expressed")+
+  theme_cowplot(12)+
+ theme(axis.text.x = element_blank(), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),legend.title = element_text(size=15,face="bold"),
+        axis.title = element_text( size = 15),legend.text = element_text( size = 15))
+
+
+
+
+b<-ggplot(data=dat4ggplot2)+
+  geom_bar(aes(x=Sample, y=value, fill=Group,alpha=Other), stat="identity")+
+  labs(alpha="Is expressed in\nother sample?")+
+  ggtitle("Genes")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c('Latent Uninfected','Latent HIV','Latent Uninfected Reactivated','Latent HIV Reactivated'))+
+  xlab("Samples")+ylab("Number of Genes")+
+  theme_cowplot(12)+
+  theme(axis.text.x = element_blank(),legend.position = "none")
+
+ggplot(data=dat4ggplot2[dat4ggplot2$Other=="yes",])+
+  geom_bar(aes(x=Sample, y=value, fill=Group), stat="identity")+
+  ggtitle("Genes")+
+  scale_alpha_manual(values=c(0.5,1))+
+  scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c('Latent Uninfected','Latent HIV','Latent Uninfected Reactivated','Latent HIV Reactivated'))+
+  xlab("Samples")+ylab("Number of Expressed")+
+  theme_cowplot(12)+
+ theme(axis.text.x = element_blank(), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),legend.title = element_text(size=15,face="bold"),
+        axis.title = element_text( size = 15),legend.text = element_text( size = 15))
+
+
+
+plot_grid(ncol=2,plotlist = list(b,a))
+```
+
+As it can be appreciated circRNAs are being accumulated in the resting state. 
+
+Principal component analysis of all genes vs circRNA
+
+```{r PCAallBosque,echo=F, message=FALSE,fig.height=3, fig.width=6}
+PCA_LPI <- prcomp(t(cpm(y)[!(rownames(cpm(y)) %in% circ_annotation_Bosque$Name),]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Infection=coldata[rownames(PCA_LPI$x),"Infection"],
+              Activation=factor(coldata[rownames(PCA_LPI$x),"Activation"]),
+              Group=coldata[rownames(PCA_LPI$x),"Group"])
+a<-ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Infection, shape=Activation),size=2)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("firebrick1","dodgerblue"))+
+  ggtitle("Only Gene Count")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+coldata2<-coldata
+coldata2$Activation<- as.character(coldata2$Activation)
+coldata2$Activation[coldata2$Activation=="Activated"]<-"Reactivated"
+coldata2$Activation<- factor(coldata2$Activation, levels=c("Resting","Reactivated"))
+
+PCA_LPI <- prcomp(t(cpm(y)[circ_annotation_Bosque$Name,]))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Infection=coldata2[rownames(PCA_LPI$x),"Infection"],
+              Activation=factor(coldata2[rownames(PCA_LPI$x),"Activation"]),
+              Group=coldata2[rownames(PCA_LPI$x),"Group"])
+b<-ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Infection, shape=Activation),size=3)+
+  labs(colour="Infection")+
+  scale_color_manual(values=c("firebrick1","dodgerblue"))+
+  ggtitle("circRNA")+
+  theme_cowplot(12)+
+  theme(text = element_text(size=15))
+
+plot_grid(ncol=2,plotlist = list(a,b))
+```
+
+Differential expression analysis (Volcano Plots):
+
+```{r DEBosque,echo=F, message=FALSE}
+lrt <- glmLRT(fit,contrast=c(0,0,-1,1,0,0,0)) # groupUninfected_Activated vs groupHIV_Activated
+top4_UAvsHA_Bosque <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_UAvsHA_Bosque
+DE_UAvsHA_Bosque<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #1
+
+lrt <- glmLRT(fit,contrast=c(0,1,0,-1,0,0,0)) # groupHIV_Activated vs groupHIV_Resting
+top4_HAvsHR_Bosque <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_HAvsHR_Bosque
+DE_HAvsHR_Bosque<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #7112
+
+lrt <- glmLRT(fit,contrast=c(0,1,-1,0,0,0,0)) # groupUninfected_Activated vs groupHIV_Resting
+top4_UAvsHR_Bosque <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_UAvsHR_Bosque
+DE_UAvsHR_Bosque<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #7179
+
+lrt <- glmLRT(fit,contrast=c(1,-1,0,0,0,0,0)) # groupUninfected_Resting vs groupHIV_Resting
+top4_URvsHR_Bosque <- topTags(lrt, n=Inf, sort.by = "none")
+top4<-top4_URvsHR_Bosque
+DE_URvsHR_Bosque<-top4$table[top4$table$FDR<0.05 & abs(top4$table$logFC) >= 1,] #54
+```
+
+```{r VolcBosque1,echo=F, message=FALSE,warning=FALSE,fig.height=8, fig.width=15}
+volcdata_circ<-top4_URvsHR_Bosque$table[rownames(top4_URvsHR_Bosque$table) %in% rownames(cts_c_Bosque),]
+volcdata_NOTcirc<-top4_URvsHR_Bosque$table[!(rownames(top4_URvsHR_Bosque$table) %in% rownames(cts_c_Bosque)),]
+a<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,ylim = c(0,2),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+a1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_UAvsHR_Bosque$table[rownames(top4_UAvsHR_Bosque$table) %in% rownames(cts_c_Bosque),]
+volcdata_NOTcirc<-top4_UAvsHR_Bosque$table[!(rownames(top4_UAvsHR_Bosque$table) %in% rownames(cts_c_Bosque)),]
+b<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,#ylim = c(0,4),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+b1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+volcdata_circ<-top4_HAvsHR_Bosque$table[rownames(top4_HAvsHR_Bosque$table) %in% rownames(cts_c_Bosque),]
+volcdata_NOTcirc<-top4_HAvsHR_Bosque$table[!(rownames(top4_HAvsHR_Bosque$table) %in% rownames(cts_c_Bosque)),]
+c<-EnhancedVolcano(volcdata_circ, lab = rownames(volcdata_circ), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,#ylim = c(0,4),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+c1<-EnhancedVolcano(volcdata_NOTcirc, lab = rownames(volcdata_NOTcirc), x = 'logFC', y = 'FDR',
+                pCutoff=0.05, FCcutoff = 1, title="", subtitle = "",
+                selectLab="",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+plot_grid(ncol=3,plotlist = list(a,b,c,a1,b1,c1), labels=c("circRNA Uninfected Resting hrs vs HIV Resting","circRNA Uninfected Activated hrs vs HIV Resting","circRNA HIV Activated hrs vs HIV Resting","Genes Uninfected Resting hrs vs HIV Resting","Genes Uninfected Activated hrs vs HIV Resting","Genes HIV Activated hrs vs HIV Resting"),label_x=0,hjust=0)
+
+```
+
+DE in numbers:
+
+```{r TableBosque,echo=F, message=FALSE}
+cURvsHR_up_Bosque<-sum(DE_URvsHR_Bosque[rownames(DE_URvsHR_Bosque) %in% rownames(cts_c_Bosque),1]>0)
+cURvsHR_down_Bosque<-sum(DE_URvsHR_Bosque[rownames(DE_URvsHR_Bosque) %in% rownames(cts_c_Bosque),1]<0)
+gURvsHR_up_Bosque<-sum(DE_URvsHR_Bosque[!(rownames(DE_URvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]>0)
+gURvsHR_down_Bosque<-sum(DE_URvsHR_Bosque[!(rownames(DE_URvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]<0)
+
+cUAvsHR_up_Bosque<-sum(DE_UAvsHR_Bosque[rownames(DE_UAvsHR_Bosque) %in% rownames(cts_c_Bosque),1]>0)
+cUAvsHR_down_Bosque<-sum(DE_UAvsHR_Bosque[rownames(DE_UAvsHR_Bosque) %in% rownames(cts_c_Bosque),1]<0)
+gUAvsHR_up_Bosque<-sum(DE_UAvsHR_Bosque[!(rownames(DE_UAvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]>0)
+gUAvsHR_down_Bosque<-sum(DE_UAvsHR_Bosque[!(rownames(DE_UAvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]<0)
+
+cHAvsHR_up_Bosque<-sum(DE_HAvsHR_Bosque[rownames(DE_HAvsHR_Bosque) %in% rownames(cts_c_Bosque),1]>0)
+cHAvsHR_down_Bosque<-sum(DE_HAvsHR_Bosque[rownames(DE_HAvsHR_Bosque) %in% rownames(cts_c_Bosque),1]<0)
+gHAvsHR_up_Bosque<-sum(DE_HAvsHR_Bosque[!(rownames(DE_HAvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]>0)
+gHAvsHR_down_Bosque<-sum(DE_HAvsHR_Bosque[!(rownames(DE_HAvsHR_Bosque) %in% rownames(cts_c_Bosque)),1]<0)
+
+temp<-data.frame(Test=c(rep("Uninfected Resting vs HIV Resting",2), rep("Uninfected Activated vs HIV Resting",2),
+                  rep("HIV Activated vs HIV Resting",2)),
+          Feature=rep(c("CircRNA","Gene"),3),
+          Downregulated=c(cURvsHR_down_Bosque,gURvsHR_down_Bosque,
+                          cUAvsHR_down_Bosque,gUAvsHR_down_Bosque,
+                          cHAvsHR_down_Bosque, gHAvsHR_down_Bosque),
+          Upregulated=c(cURvsHR_up_Bosque,gURvsHR_up_Bosque,
+                          cUAvsHR_up_Bosque,gUAvsHR_up_Bosque,
+                          cHAvsHR_up_Bosque, gHAvsHR_up_Bosque))
+kable(temp, aling="c",floating.environment="sidewaystable") %>% 
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+All DE circRNAs in a heatmap:
+
+```{r exampleBosque,echo=F, message=FALSE,warning=FALSE,fig.height=4, fig.width=5}
+temp<-unique(c(rownames(DE_HAvsHR_Bosque), rownames(DE_UAvsHR_Bosque),rownames(DE_URvsHR_Bosque)))
+
+ann_colors<- list(Group=c(Uninfected_Resting="orange",HIV_Resting="red",
+                          Uninfected_Activated="cyan",HIV_Activated="blue"),
+                  Donor=c(A=inferno(4)[1],B=inferno(4)[2],C=inferno(4)[3],D=inferno(4)[4]))
+
+pheatmap(cpm(y)[temp[temp %in% rownames(cts_c_Bosque)],],annotation_col = coldata[,c("Donor","Group")], show_rownames = F, color = viridis(50,begin = 1,end=0),border_color = NA, scale="row",clustering_distance_cols = "correlation",clustering_method = "ward.D",annotation_colors=ann_colors)
+```
+
+Top 3 DE circRNAs
+
+```{r exampleBosque1,echo=F, message=FALSE,warning=FALSE,fig.height=8, fig.width=10}
+temp<-rbind(DE_HAvsHR_Bosque,DE_UAvsHR_Bosque,DE_URvsHR_Bosque)
+temp_circ<-temp[rownames(temp)%in% rownames(cts_c_Bosque),]
+temp_circ<-temp_circ[order(temp_circ$FDR),]
+
+cout<-list()
+gout<-list()
+rout<-list()
+
+for (i in rownames(temp_circ)[1:3]){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Bosque[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_Bosque$Reference[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(sum(rownames(cpm(y)) %in% gtmpmap)){
+    ptmp2<-cpm(y)[rownames(cpm(y)) %in% gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+
+  cout[[i]]<-ggplot(ptmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+
+
+plot_grid(ncol=3,plotlist = c(cout,gout,rout))
+
+```
+
+DE circRNA in resting cells HIV vs Uninfected:
+
+```{r indeepthBosque,echo=F, message=FALSE,warning=FALSE,fig.height=8, fig.width=7}
+URvsHR_relation_Bosque<-t(sapply(rownames(DE_URvsHR_Bosque[rownames(DE_URvsHR_Bosque)%in% rownames(cts_c_Bosque),]),
+  function(x,data=DE_URvsHR_Bosque){
+    gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+UAvsHR_relation_Bosque<-t(sapply(rownames(DE_UAvsHR_Bosque[rownames(DE_UAvsHR_Bosque)%in% rownames(cts_c_Bosque),]),
+  function(x,data=DE_UAvsHR_Bosque){
+    gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+HAvsHR_relation_Bosque<-t(sapply(rownames(DE_HAvsHR_Bosque[rownames(DE_HAvsHR_Bosque)%in% rownames(cts_c_Bosque),]),
+  function(x,data=DE_HAvsHR_Bosque){
+    gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=x,fixed=T)])
+    gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+    if(sum(rownames(data) %in% gtmpmap)>=1){
+      lfctmp<-data[rownames(data) %in% gtmpmap,1]
+      lfctmp[lfctmp>0]<-1
+      lfctmp[lfctmp<0]<--1
+      if(sum(lfctmp)>0){gen<-"up"}else{gen<-"down"}
+    }else{
+      gen<-"NS"
+    }
+    if(data[x,1]>0){circ<-"up"}else{circ<-"down"}
+    c(gen,circ)
+}))
+
+opp_act1<-names(which(grepl(UAvsHR_relation_Bosque[,1],pattern="up|down") & UAvsHR_relation_Bosque[,1] != UAvsHR_relation_Bosque[,2]))
+opp_act2<-names(which(grepl(HAvsHR_relation_Bosque[,1],pattern="up|down") & HAvsHR_relation_Bosque[,1] != HAvsHR_relation_Bosque[,2]))
+
+
+cout<-list()
+gout<-list()
+rout<-list()
+for (i in rownames(URvsHR_relation_Bosque)){
+#for (i in opp){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Bosque[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_Bosque$Reference[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(sum(rownames(cpm(y)) %in% gtmpmap)){
+    ptmp2<-cpm(y)[rownames(cpm(y)) %in% gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+
+  cout[[i]]<-ggplot(ptmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_Resting" = "Latent Uninfected", "HIV_Resting" = "Latent HIV",
+                              "Uninfected_Activated" = "Latent Uninfected Reactivated","HIV_Activated" = "Latent HIV Reactivated"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),
+        axis.title = element_text( size = 15),legend.position = "none")
+  rout[[i]]<-ggplot(rtmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_Resting" = "Latent Uninfected", "HIV_Resting" = "Latent HIV",
+                              "Uninfected_Activated" = "Latent Uninfected Reactivated","HIV_Activated" = "Latent HIV Reactivated"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),
+        axis.title = element_text( size = 15),legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("orange","red","cyan","blue"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_Resting" = "Latent Uninfected", "HIV_Resting" = "Latent HIV",
+                              "Uninfected_Activated" = "Latent Uninfected Reactivated","HIV_Activated" = "Latent HIV Reactivated"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.text =element_text( size = 12),
+        plot.title = element_text(size=18),
+        axis.title = element_text( size = 15),legend.position = "none")
+}
+plot_grid(ncol=2,plotlist = c(cout,gout,rout))
+plot_grid(ncol=2,plotlist = c(cout,gout))
+```
+
+
+####PDE3B
+
+* circRNA reported
+* key regulators of many important physiological processes
+* May play a role in fat metabolism
+* ritonavir decreases PDE3B
+* PDE3B gene the most repressed by Foxp3
+* retroviral gene transfer and expression of PDE3B into Tregs was deleterious to Treg homeostasis
+* With a reduced expression of Foxp3, miR142-3p and PDE3B expression will not be downregulated; therefore, PDE3B will start to degrade intracellular cAMP and miR142-3p will block AC9 mRNA, inhibiting cAMP production
+* Insufficient cAMP levels in conventional T cells upon cellular contact, together with the decreased endogenous production of cAMP (Figure 1 ⑤), will result in lower ICER production via PKA activation and, therefore, NFAT will maintain the induction of pro-inflammatory cytokines, such as IL-2. NFAT will also bind to HIV-promoter enhancing HIV genes transcription
+* HIV-1 Tat decreases the intracellular levels of cAMP 
+* Something related to PKA
+
+####GTDC1
+
+* circRNA reported
+* GTDC1 (Glycosyltransferase Like Domain Containing 1) is a Protein Coding gene
+
+Are those the only circRNA from each gene?
+
+NO
+
+Other 10 circRNAs from PDE3B and other from GTDC1. But the majority of the are only expressed in one sample. If we filter them only 4 circRNAS from PDE3B. And the count looks like this:
+
+![CircRNA](figure2_complete.png){ width=75% height=75% }
+```{r otherCirc ,echo=F, message=FALSE,warning=FALSE,fig.height=4, fig.width=20}
+otherCirc<-circ_annotation_Bosque$Name[circ_annotation_Bosque$Gene %in% circ_annotation_Bosque$Gene[circ_annotation_Bosque$Name %in% rownames(URvsHR_relation_Bosque)]]
+x<-otherCirc[!(otherCirc %in% rownames(URvsHR_relation_Bosque))]
+z<-cpm(y)[sort(c(x,"chr11:14789105-14819209")),]
+z<-z[rowSums(z>0)>1,]
+
+cout<-list()
+gout<-list()
+rout<-list()
+for (i in rownames(z)){
+#for (i in opp){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Bosque[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+
+  cout[[i]]<-ggplot(ptmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+plot_grid(ncol=5,plotlist = cout)
+```
+
+Interestingly not alternative splicing detected in these samples. 
+
+Now 3 randomly selected DE circRNA out of 20 with opposite gene expression pattern (significativly)
+
+```{r indeepthBosque2,echo=F, message=FALSE,warning=FALSE,fig.height=8, fig.width=10}
+cout<-list()
+gout<-list()
+rout<-list()
+for (i in sample(unique(opp_act1,opp_act2))[1:3]){
+  ptmp<-melt(cpm(y)[i,])
+  ptmp<-cbind(ptmp, coldata[rownames(ptmp),])
+  rtmp<-melt(ratio_c_Bosque[i,])
+  rtmp<-cbind(rtmp, coldata[rownames(rtmp),])
+  gtmp<-as.character(circ_annotation_Bosque$Gene[grepl(circ_annotation_Bosque$Name,pattern=i,fixed=T)])
+  gtmpmap<-as.character(unique(annotation_Bosque$Gene[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-as.character(unique(annotation_Bosque$Reference[grep(annotation_Bosque$RefGen,pattern=gtmp,fixed=T)]))
+  ntmp<-unique(sapply(strsplit(ntmp,split = "|",fixed=T),'[[',1))
+  if(sum(rownames(cpm(y)) %in% gtmpmap)){
+    ptmp2<-cpm(y)[rownames(cpm(y)) %in% gtmpmap,]
+  }else{ptmp2<-melt(cpm(y)[i,]);ptmp2[,1]<-0}
+  if(length(gtmpmap)>1){ptmp2<-melt(colSums(ptmp2))}else{ptmp2<-melt(ptmp2)}
+  ptmp2<-cbind(ptmp2, coldata[rownames(ptmp2),])
+
+  cout[[i]]<-ggplot(ptmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(i)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  rout[[i]]<-ggplot(rtmp,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle("circRNA/linearRNA")+ylab("Ratio")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+  gout[[i]]<-ggplot(ptmp2,aes(x=Group,y=value))+
+     geom_boxplot(aes(x=Group,y=value, fill=Group))+
+     geom_point(alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+     scale_fill_manual(values=c("deepskyblue","indianred1","deepskyblue4","red"),
+                    labels=c("Uninfected 12hrs", "HIV 12 hrs","Uninfected 24hrs", "HIV 24 hrs"))+
+     scale_x_discrete(labels=c("Uninfected_12" = "Uninfected 12hrs", "HIV_12" = "HIV 12 hrs",
+                              "Uninfected_24" = "Uninfected 24hrs","HIV_24" = "HIV 24 hrs"))+
+     ggtitle(ntmp)+ylab("CPM")+xlab("")+
+     theme_cowplot(12)+
+     theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size=10),
+        legend.position = "none")
+}
+plot_grid(ncol=3,plotlist = c(cout,gout,rout))
+```
+
+
+```{r indeepthBosque3,echo=F, message=FALSE}
+  temp<-unique(sapply(strsplit(as.character(annotation_Bosque$Reference[annotation_Bosque$RefGen %in% circ_annotation_Bosque$Gene[circ_annotation_Bosque$Name %in% unique(opp_act1,opp_act2)]]),split = "|",fixed=T),'[[',1))
+  write.table(temp,file="Opossite_CircRNA-gene_DE.txt", quote=FALSE,row.names =FALSE,col.names=FALSE)
+```
+
+
+##### KIF2C
+  + CircRNA reported  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### FGGY
+  + CircRNA reported  --> YES
+  + Some ralation with HIV --> No
+  
+##### SCMH1
+  + CircRNA reported  --> YES
+  + Some ralation with HIV --> NO
+  
+##### SLC19A2
+  + CircRNA reported  --> YES
+  + Some ralation with HIV --> Low
+  
+##### PTER
+  + CircRNA reported  --> YES
+  + Some ralation with HIV --> NO
+  
+##### CCAR1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### EEF1AKMT1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> NO
+  
+##### CEP128
+  + CircRNA  --> YES
+  + Some ralation with HIV --> NO
+  
+##### KIF22
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### NFAT5
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### MARK4
+  + CircRNA  --> YES
+  + Some ralation with HIV --> NO
+  
+##### DNMT1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### FARSA
+  + CircRNA  --> YES
+  + Some ralation with HIV --> NO
+  
+##### MCM6
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### KIF3B
+  + CircRNA  --> YES
+  + Some ralation with HIV --> low
+  
+##### NUP54
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### RARS
+  + CircRNA  --> YES
+  + Some ralation with HIV --> **YES**
+  
+##### ZC3HC1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> NO
+  
+##### OXR1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> low
+  
+##### CDKN2B-AS1
+  + CircRNA  --> YES
+  + Some ralation with HIV --> no
+
+
+The gene list was analyzed in GeneAnalytics:
+
+ * Gene Onthology enrichment:
+    + Gene Silencing
+    + Microtubule Binding
+    + Retrograde Vesicle-mediated Transport
+ 
+
+```{r indeepthBosque4,echo=F, message=FALSE,warning=FALSE,fig.height=4, fig.width=9}
+circGenesDE_act<-unique(
+  circ_annotation_Bosque[
+    circ_annotation_Bosque$Name %in% rownames(DE_UAvsHR_Bosque[rownames(DE_UAvsHR_Bosque)%in% rownames(cts_c_Bosque),]),"Gene"],
+  circ_annotation_Bosque[
+    circ_annotation_Bosque$Name %in% rownames(DE_HAvsHR_Bosque[rownames(DE_HAvsHR_Bosque)%in% rownames(cts_c_Bosque),]),"Gene"])
+dat4venn<- list("Uninfected Activated vs HIV Resting"=rownames(DE_UAvsHR_Bosque[rownames(DE_UAvsHR_Bosque)%in% rownames(cts_c_Bosque),]),
+                "HIV Activated vs HIV Resting"=rownames(DE_HAvsHR_Bosque[rownames(DE_HAvsHR_Bosque)%in% rownames(cts_c_Bosque),]))
+plot(venndetail(dat4venn),mycol=c("purple","red"))
+```
+
+
+As mentioned above the circRNAs and genes are mainly DE between resting and reactivated samples.  

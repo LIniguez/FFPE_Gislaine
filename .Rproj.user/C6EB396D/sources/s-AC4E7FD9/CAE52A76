@@ -1,0 +1,29 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1572998402069.000,
+    "dirty" : false,
+    "encoding" : "",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "CAE52A76",
+    "lastKnownWriteTime" : 0,
+    "last_content_update" : 1572998402069,
+    "path" : null,
+    "project_path" : null,
+    "properties" : {
+        "cacheKey" : "6E3B859B",
+        "caption" : "listDE",
+        "contentUrl" : "grid_resource/gridviewer.html?env=&obj=listDE&cache_key=6E3B859B",
+        "displayedObservations" : 166,
+        "environment" : "",
+        "object" : "listDE",
+        "preview" : 0,
+        "totalObservations" : 166,
+        "variables" : 4
+    },
+    "relative_order" : 5,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_dataframe"
+}

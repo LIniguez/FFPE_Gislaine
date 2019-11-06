@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1572976372989.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "ACAA2936",
+    "lastKnownWriteTime" : 1567174013,
+    "last_content_update" : 1567174013,
+    "path" : "~/Documents/WCM/mbendall/genequant/Miguel_Analysis.Rmd",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "299,33",
+        "scrollLine" : "291"
+    },
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}

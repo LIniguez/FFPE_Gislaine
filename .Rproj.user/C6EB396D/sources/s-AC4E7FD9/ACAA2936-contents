@@ -1,0 +1,836 @@
+---
+title: "HIV Latency study for Miguel de Mulder"
+author: "Luis P Iniguez"
+date: "3/27/2019"
+output:
+  pdf_document: default
+  html_document: default
+bibliography: bibliography.bib
+---
+
+```{r setup, include=FALSE}
+library("DESeq2")
+library("pheatmap")
+library("ggplot2")
+library("IHW")
+library('reshape2')
+library('VennDiagram')
+library('viridis')
+library("cowplot")
+library('knitr')
+library("RColorBrewer")
+library("ggsignif")
+library("apeglm")
+library("EnhancedVolcano")
+
+setwd("~/Documents/WCM/mbendall/genequant")
+cts_g <- as.matrix(read.delim("Gene_table_mbendall.txt",row.names = 1))
+cts_h <- as.matrix(read.delim("HERV_hiconf_table_mbendall.txt",row.names = 1))
+cts_l <- as.matrix(read.delim("L1_hiconf_table_mbendall.txt",row.names = 1))
+coldata <- read.delim("../sample_annotation.txt", row.names=1)
+annotation<- read.delim("DE_annotations.txt")
+annotation<- read.delim("ttg.txt")
+temp<-data.frame(cts_g,Gene=rownames(cts_g))
+temp<-merge(temp,annotation,by.x ="Gene", by.y="target_id")
+annotation_g<- as.character(temp$gene_sym)
+temp<-""  
+```
+## Mapping and Quantification
+
+All the samples were analyzed with the same methodology. It consists of a mapping all reads with Bowtie2 followed by Telescope for HERV and L1 expression quantification, one run per transposable element annotation. The annotations were made by Matthew Bendall and can be found [here](https://github.com/mlbendall/telescope_annotation_db/tree/master/builds). It is worth to mention that for further analysis the column of *final_conf* was used for L1 and HERV read count. For gene quantification [kallisto](https://pachterlab.github.io/kallisto/about) was used and the gene annotations were pulled down from UCSC. More info about the gene annotations done by Matthew could be found [here](https://github.com/gwcbi/cbi_reference_genomes/blob/master/build_hg38full.sh).
+
+```{bash mapping, eval=FALSE, echo=T}
+bowtie2 --no-unal --score-min L,0,1.6 -p -k 100 --very-sensitive-local -x /path/to/bowtie2/index -S output.sam [-1 _1.fastq -2 _2.fastq | -U .fastq]
+telescope assign --exp_tag HERV --theta_prior 200000 --max_iter 200 --updated_sam output.sam HERVannotation.gtf
+telescope assign --exp_tag L1 --theta_prior 200000 --max_iter 200 --updated_sam output.sam L1annotation.gtf
+kallisto quant -b 100 -i /path/to/kallisto/index [...]
+```
+
+## Bosque HIV Latency Model
+
+The first samples analyzed were from White et al. [-@DelBosque2016], they have 4 different conditions, resting not infected, resting HIV, activated not infected and activated HIV. The idea was to identify genes, HERVs or L1 differentially expressed between resting HIV (the latent model) and the rest of the samples. This means, in the resting HIV it should be higher or lower expressed than the rest. For that I needed to look in the 3 comparisons. Wald test for each comparison using DESeq2 [@Love2014] and LFC shrinkage 'apeglm' [@apeglm]. Threshold for calling differentially expressed is a s-value <= 0.1. 
+
+```{r bosque1, echo=F, message=FALSE}
+subset<-coldata[coldata$ProjectName == 'delBosque',c("Activation","HIV","Donor")]
+subset$Group<-factor(paste0(subset$Activation, "_",subset$HIV),
+ levels=c('Resting_HIV','Resting_Uninfected','Reactivated_HIV','Reactivated_Uninfected')) 
+all<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset)]
+annotation_sub<-c(annotation_g,rownames(cts_h),rownames(cts_l))
+mincount <- 10;minrep <- 4
+expressed<-rowSums(all >= mincount) >= minrep
+all <- all[expressed,]
+annotation_sub <-annotation_sub[expressed]
+dds_bosque <- DESeqDataSetFromMatrix(countData = all,colData = subset,design =~ Group+Donor)
+dds_bosque<-DESeq(dds_bosque, fitType = "parametric")
+```
+
+PCA of the samples look like this:
+
+```{r PCA1,echo=F, message=FALSE,fig.height=3, fig.width=4}
+rld_v3 <- vst(dds_bosque, blind=TRUE,fitType = "parametric")
+PCA_LPI <- prcomp(t(assay(rld_v3)))
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Activation=dds_bosque$Activation,HIV=dds_bosque$HIV,Patient=dds_bosque$Donor)
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Activation, shape=HIV),size=2)+
+  ggtitle("Gene Count + HERVs + L1")+
+  theme(text = element_text(size=15))
+```
+
+```{r PCA1_i,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+rld_v3 <- vst(dds_bosque, blind=TRUE,fitType = "parametric")
+PCA_LPI <- prcomp(t(assay(rld_v3)))
+percentVar<-round(100*summary(PCA_LPI)$importance[2,1:2],0)
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Activation=dds_bosque$Activation,HIV=dds_bosque$HIV,Donor=dds_bosque$Donor, Treatment=dds_bosque$Group)
+pca<-ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Treatment, shape=Donor),size=5)+
+  scale_color_manual(values=c("red","orange","blue","cyan"),labels=c("Resting HIV", "Resting Uninfected","Reactivated HIV", "Reactivated Uninfected"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance"))+
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))+
+  scale_shape_manual(values=c(15:18))+
+  theme(text = element_text(size=30), axis.text=element_text(size=20))
+ggsave("PCA_Bosque.tiff", plot=pca, device="tiff", dpi=300, width=40,height = 30, units="cm",compression = "lzw")
+```
+
+
+The PCA shows that the variation between samples is due to activation, and the second is the patients and NOT the infection:
+
+```{r PCA1a,echo=F, message=FALSE,fig.height=3, fig.width=4}
+ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Donor, shape=HIV),size=2)+
+  ggtitle("Gene Count + HERVs + L1")+
+  theme(text = element_text(size=15))
+```
+
+Differentially Expressed Genes/HERVs/L1
+
+```{r bosque1a, echo=F, message=FALSE}
+res_RN_RI_BOSQUE<-lfcShrink(dds_bosque, coef="Group_Resting_Uninfected_vs_Resting_HIV", type="apeglm",svalue=T,lfcThreshold = 0.5)
+DE_up_RN_RI_BOSQUE<-rownames(res_RN_RI_BOSQUE[res_RN_RI_BOSQUE$svalue<=0.1& !is.na(res_RN_RI_BOSQUE$svalue)& res_RN_RI_BOSQUE$log2FoldChange>=0,])
+DE_up_RN_RI_BOSQUE_ann<-annotation_sub[res_RN_RI_BOSQUE$svalue<=0.1& !is.na(res_RN_RI_BOSQUE$svalue)& res_RN_RI_BOSQUE$log2FoldChange>=0]
+DE_down_RN_RI_BOSQUE<-rownames(res_RN_RI_BOSQUE[res_RN_RI_BOSQUE$svalue<=0.1& !is.na(res_RN_RI_BOSQUE$svalue)&res_RN_RI_BOSQUE$log2FoldChange<=0,] )
+DE_down_RN_RI_BOSQUE_ann<-annotation_sub[res_RN_RI_BOSQUE$svalue<=0.1& !is.na(res_RN_RI_BOSQUE$svalue)&res_RN_RI_BOSQUE$log2FoldChange<=0]
+
+res_AN_RI_BOSQUE<-lfcShrink(dds_bosque, coef="Group_Reactivated_Uninfected_vs_Resting_HIV", type="apeglm", svalue=T,lfcThreshold = 0.5)
+DE_up_AN_RI_BOSQUE<-rownames(res_AN_RI_BOSQUE[res_AN_RI_BOSQUE$svalue<=0.1& !is.na(res_AN_RI_BOSQUE$svalue)& res_AN_RI_BOSQUE$log2FoldChange>=0,])
+DE_up_AN_RI_BOSQUE_ann<-annotation_sub[res_AN_RI_BOSQUE$svalue<=0.1& !is.na(res_AN_RI_BOSQUE$svalue)& res_AN_RI_BOSQUE$log2FoldChange>=0]
+DE_down_AN_RI_BOSQUE<-rownames(res_AN_RI_BOSQUE[res_AN_RI_BOSQUE$svalue<=0.1& !is.na(res_AN_RI_BOSQUE$svalue)&res_AN_RI_BOSQUE$log2FoldChange<=0,] )
+DE_down_AN_RI_BOSQUE_ann<-annotation_sub[res_AN_RI_BOSQUE$svalue<=0.1& !is.na(res_AN_RI_BOSQUE$svalue)&res_AN_RI_BOSQUE$log2FoldChange<=0]
+
+res_AI_RI_BOSQUE<-lfcShrink(dds_bosque, coef="Group_Reactivated_HIV_vs_Resting_HIV", type="apeglm", svalue=T,lfcThreshold = 0.5)
+DE_up_AI_RI_BOSQUE<-rownames(res_AI_RI_BOSQUE[res_AI_RI_BOSQUE$svalue<=0.1& !is.na(res_AI_RI_BOSQUE$svalue)& res_AI_RI_BOSQUE$log2FoldChange>=0,])
+DE_up_AI_RI_BOSQUE_ann<-annotation_sub[res_AI_RI_BOSQUE$svalue<=0.1& !is.na(res_AI_RI_BOSQUE$svalue)& res_AI_RI_BOSQUE$log2FoldChange>=0]
+DE_down_AI_RI_BOSQUE<-rownames(res_AI_RI_BOSQUE[res_AI_RI_BOSQUE$svalue<=0.1& !is.na(res_AI_RI_BOSQUE$svalue)&res_AI_RI_BOSQUE$log2FoldChange<=0,] )
+DE_down_AI_RI_BOSQUE_ann<-annotation_sub[res_AI_RI_BOSQUE$svalue<=0.1& !is.na(res_AI_RI_BOSQUE$svalue)&res_AI_RI_BOSQUE$log2FoldChange<=0]
+
+down_Bosque<-intersect(DE_down_RN_RI_BOSQUE,intersect(DE_down_AN_RI_BOSQUE,DE_down_AI_RI_BOSQUE))
+up_Bosque<-intersect(DE_up_RN_RI_BOSQUE,intersect(DE_up_AN_RI_BOSQUE,DE_up_AI_RI_BOSQUE))
+
+down_Bosque_ann<-intersect(DE_down_RN_RI_BOSQUE_ann,intersect(DE_down_AN_RI_BOSQUE_ann,DE_down_AI_RI_BOSQUE_ann))
+up_Bosque_ann<-intersect(DE_up_RN_RI_BOSQUE_ann,intersect(DE_up_AN_RI_BOSQUE_ann,DE_up_AI_RI_BOSQUE_ann))
+
+kable(data.frame("Under-Expressed"= c(length(grep(pattern = '^NR|^NM',up_Bosque)),length(grep(pattern = '^NR|^NM|^L1',up_Bosque,invert=T)),length(grep(pattern = '^L1',up_Bosque))),
+           "Over-Expressed"= c(length(grep(pattern = '^NR|^NM',down_Bosque)),length(grep(pattern = '^NR|^NM|^L1',down_Bosque,invert=T)),length(grep(pattern = '^L1',down_Bosque))), row.names = c("Genes","HERVs","L1")),floating.environment="sidewaystable")
+pheatmap(counts(dds_bosque, normalized=T)[union(down_Bosque,up_Bosque),],scale = "row", annotation_col = subset[,c(3,4)], show_rownames = F, color = viridis(50,begin = 1,end=0), cutree_rows = 2, cutree_cols = 3,border_color = NA, main="Differentially Expresed in Bosque Latency Model")
+```
+
+```{r bosque1b}
+subset2<-subset
+subset2$Group<-factor(paste0(subset$Activation, "_",subset$HIV),
+ levels=c('Reactivated_HIV','Reactivated_Uninfected','Resting_HIV','Resting_Uninfected')) 
+dds_bosque2 <- DESeqDataSetFromMatrix(countData = all,colData = subset2 ,design =~ Group+Donor)
+dds_bosque2<-DESeq(dds_bosque2, fitType = "parametric")
+
+res_AN_AI_BOSQUE<-lfcShrink(dds_bosque2, coef="Group_Reactivated_Uninfected_vs_Reactivated_HIV", type="apeglm", svalue=T,lfcThreshold = 0.5)
+DE_up_AN_AI_BOSQUE<-rownames(res_AN_AI_BOSQUE[res_AN_AI_BOSQUE$svalue<=0.1& !is.na(res_AN_AI_BOSQUE$svalue)& res_AN_AI_BOSQUE$log2FoldChange>=0,])
+DE_down_AN_AI_BOSQUE<-rownames(res_AN_AI_BOSQUE[res_AN_AI_BOSQUE$svalue<=0.1& !is.na(res_AN_AI_BOSQUE$svalue)&res_AN_AI_BOSQUE$log2FoldChange<=0,] )
+```
+
+```{r Volcano1, echo=F, message=FALSE}
+
+
+v1<-EnhancedVolcano(res_RN_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Resting Uninfected", subtitle = "",
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                caption="", legendVisible=F, drawConnectors = TRUE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = TRUE,transcriptPointSize = 3.0)
+
+v1a<-EnhancedVolcano(res_RN_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Resting Uninfected", subtitle = "",
+                selectLab=c(down_Bosque_ann,up_Bosque_ann),
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+v2<-EnhancedVolcano(res_AN_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Reactivated Uninfected", subtitle = "", 
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                caption="", legendVisible=F, drawConnectors = TRUE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = TRUE,transcriptPointSize = 3.0)
+v2a<-EnhancedVolcano(res_AN_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Reactivated Uninfected", subtitle = "", 
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                caption="", legendVisible=F, drawConnectors = TRUE,widthConnectors = 1,
+                ylim = c(0,15),xlim=c(-10,10),
+                colConnectors = 'black',boxedlabels = TRUE,transcriptPointSize = 3.0)
+
+v3<-EnhancedVolcano(res_AI_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Reactivated HIV", subtitle = "",
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                caption="", legendVisible=F, drawConnectors = TRUE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = TRUE,transcriptPointSize = 3.0)
+v3a<-EnhancedVolcano(res_AI_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Reactivated HIV", subtitle = "",
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                ylim = c(0,15),xlim=c(-10,10),
+                caption="", legendVisible=F, drawConnectors = TRUE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = TRUE,transcriptPointSize = 3.0)
+v4_1<-EnhancedVolcano(res_RN_RI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Resting HIV vs Resting Uninfected", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+v4_2<-EnhancedVolcano(res_AN_AI_BOSQUE, lab = annotation_sub, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="Reactivated HIV vs Reactivated Uninfected", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                selectLab=c(down_Bosque_ann,up_Bosque_ann),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+```
+
+
+```{r bosque1a_i,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+anncol<-subset[,c(3,4)]
+colnames(anncol)<-c("Donor","Treatment")
+anncol$Treatment<-gsub("_", " ", anncol$Treatment)
+anncol$Treatment<-factor(anncol$Treatment,
+                         levels=c("Resting HIV","Resting Uninfected",
+                                  "Reactivated HIV","Reactivated Uninfected"))
+
+pheatmap(counts(dds_bosque, normalized=T)[union(down_Bosque,up_Bosque),],
+         scale = "row", annotation_col = anncol,
+         show_rownames = F, color = viridis(50,begin = 1,end=0),
+         cutree_rows = 2, cutree_cols = 3,border_color = NA,treeheight_col=100,treeheight_row=100,
+         fontsize_col=20,legend_breaks=c(-3,0,3),
+         annotation_colors=list(
+           Treatment=c("Resting HIV"="red","Resting Uninfected"="orange",
+                   "Reactivated HIV"="blue","Reactivated Uninfected"="cyan"),
+           Donor=c(A=plasma(4)[1],B=plasma(4)[2],
+                   C=plasma(4)[3],D=plasma(4)[4])),
+         annotation_names_col=F, filename="Bosque_heatmap.tiff", width=20, height = 20, 
+         fontsize=30,lwd=3)
+```
+
+```{r bosque1a_ii,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+figEXAM_down<-data.frame(
+  expression=round(c(rnorm(4, mean=100, sd=5), abs(rnorm(4, mean=10,sd=5)),
+                     rnorm(4, mean=100,sd=5), rnorm(4,mean=100,sd=5))),
+  group=c(rep(levels(dds_bosque$Group)[2],4),rep(levels(dds_bosque$Group)[1],4),
+          rep(levels(dds_bosque$Group)[4],4),rep(levels(dds_bosque$Group)[3],4)),
+  Donor=c(rep(c("A","B","C","D"),4)))
+figEXAM_down$group<-factor(figEXAM_down$group,
+                           levels=c('Resting_Uninfected','Resting_HIV',
+                                    'Reactivated_Uninfected','Reactivated_HIV'))
+figEXAM_down$Donor<-factor(figEXAM_down$Donor, levels=c("A","B","C","D"))
+figEXAM_down_out<-ggplot(data=figEXAM_down,aes(x=group, y=expression))+
+  geom_bar(data=data.frame(h=c(rep(127,4)),
+                           g=factor(levels(figEXAM_down$group), levels=levels(figEXAM_down$group))),
+           aes(x=g, y=h),fill=c("orange","red","cyan","blue"),stat="identity", width=1)+
+  geom_line(aes(group=Donor),lwd=1.2)+
+  geom_point(aes(group=Donor),size=4)+
+  geom_signif(y_position=c(112,117,122),xmin=rep("Resting_HIV",3),
+              xmax=c("Resting_Uninfected", "Reactivated_Uninfected","Reactivated_HIV"),
+              annotations = c("***", "***","***"),size = 1,textsize = 10,vjust=0.7 )+
+  scale_x_discrete(breaks=levels(figEXAM_down$group),
+                   labels=c('Resting Uninfected','Resting HIV','Reactivated Uninfected','Reactivated HIV'))+
+  ylab("Expected Expression")+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1,size=25),
+        text=element_text(size = 30),
+        axis.text.y =element_blank())
+ggsave(filename = "Bosque_Cartoon_Down.tiff",plot=figEXAM_down_out,device = "tiff",dpi=300,width = 30,height = 30,units = "cm",compression = "lzw")
+```
+
+```{r bosque1a_iii,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+figEXAM_up<-data.frame(
+    expression=round(c(abs(rnorm(4, mean=10, sd=5)), rnorm(4, mean=100,sd=5),
+                       abs(rnorm(4, mean=10,sd=5)), abs(rnorm(4,mean=10,sd=5))),
+    group=c(rep(levels(dds_bosque$Group)[2],4),rep(levels(dds_bosque$Group)[1],4),
+            rep(levels(dds_bosque$Group)[4],4),rep(levels(dds_bosque$Group)[3],4)),
+    Donor=c(rep(c("A","B","C","D"),4)))
+figEXAM_up$group<-factor(figEXAM_up$group,
+                             levels=c('Resting_Uninfected','Resting_HIV',
+                                      'Reactivated_Uninfected','Reactivated_HIV'))
+figEXAM_up$Donor<-factor(figEXAM_up$Donor, levels=c("A","B","C","D"))
+figEXAM_up_out<-ggplot(data=figEXAM_up,aes(x=group, y=expression))+
+    geom_bar(data=data.frame(h=c(rep(127,4)),
+                             g=factor(levels(figEXAM_down$group), levels=levels(figEXAM_down$group))),
+             aes(x=g, y=h),fill=c("orange","red","cyan","blue"),stat="identity", width=1)+
+    geom_line(aes(group=Donor),lwd=1.2)+
+    geom_point(aes(group=Donor),size=4)+
+    geom_signif(y_position=c(112,117,122),xmin=rep("Resting_HIV",3),
+                xmax=c("Resting_Uninfected", "Reactivated_Uninfected","Reactivated_HIV"),
+                annotations = c("***", "***","***"),size = 1,textsize = 10,vjust=0.7 )+
+    scale_x_discrete(breaks=levels(figEXAM_down$group),
+                     labels=c('Resting Uninfected','Resting HIV',
+                              'Reactivated Uninfected','Reactivated HIV'))+
+    ylab("Expected Expression")+
+    theme(axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1,size=25),
+          text=element_text(size = 30),
+          axis.text.y =element_blank())
+ggsave(filename = "Bosque_Cartoon_Up.tiff",plot=figEXAM_up_out,device = "tiff",dpi=300,width = 30,height = 30,units = "cm",compression = "lzw")
+```
+
+HERVs and L1 differentially expressed look like this:
+
+```{r bosque2, echo=F, message=FALSE}
+gout<-list()
+#for (i in grep(pattern = '^NR|^NM',union(down_Bosque,up_Bosque), invert=T, value = T)){
+for (i in rownames(res_AN_RI_BOSQUE[grep(annotation_sub, pattern="FUS"),])){
+  x<-i
+  dat4plot<-plotCounts(dds_bosque,gene=x, intgroup = c("Group", "Donor"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_Uninfected","Resting_HIV","Reactivated_Uninfected", "Reactivated_HIV"),order=T)
+  gout[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count))+
+  geom_point( aes(color=Donor), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+  scale_color_viridis_d()+
+  scale_fill_viridis_d()+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(x)+ylab("Normalized Count")+xlab("")+
+  theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust = 1),text = element_text(size=10))
+}
+plot_grid(ncol=2,plotlist = gout)
+
+```
+
+```{r bosque2i,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+for (i in grep(pattern = '^NR|^NM',union(down_Bosque,up_Bosque), invert=T, value = T)){
+  x<-i
+  dat4plot<-plotCounts(dds_bosque,gene=x, intgroup = c("Group", "Donor"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_Uninfected","Resting_HIV","Reactivated_Uninfected", "Reactivated_HIV"),order=T)
+  pd<- position_dodge(0.4)
+  graout<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_bar(data=data.frame(h=c(rep(max(dat4plot$count)*1.1,4)),
+                             g=factor(levels(dat4plot$Group), levels=levels(dat4plot$Group))),
+             aes(x=g, y=h),fill=c("orange","red","cyan","blue"),stat="identity", width=1, lwd=1.2)+
+  geom_boxplot(aes(x=Group,y=count),color="black")+
+  geom_point( position = pd,aes(color=Donor),size = 5)+
+  geom_line(position = pd,aes(group=Donor,color=Donor),lwd=1.3)+
+  scale_color_viridis_d(option = "C")+
+  scale_fill_viridis_d(option = "C")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(x)+ylab("Normalized Count")+
+  scale_x_discrete(breaks=levels(dat4plot$Group),
+                     labels=c('Resting Uninfected','Resting HIV','Reactivated Uninfected','Reactivated HIV'))+
+    ylab("Normalized Count")+
+    theme(axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 35, hjust = 1,size=25),
+          text=element_text(size = 30),
+          plot.title = element_text(size = 40),
+          axis.text.y =element_text(size = 25))
+  fname<-paste0(x,"_Bosque.tiff")
+  ggsave(filename = fname,plot=graout,device = "tiff",dpi=300,width = 30,height = 30,units = "cm",compression = "lzw")
+}
+
+write.table(counts(dds_bosque,normalized=T)[union(down_Bosque,up_Bosque),], file="Bosque_DE_normalizedCounts.txt",quote=F,sep="\t")
+write.table(subset, file="Samples_Bosque.txt", quote=F,sep="\t")
+write.table(annotation, file="DE_annotation.txt", quote=F, sep="\t")
+
+```
+
+
+
+## Miguel and Talia Samples
+
+The next step was to analyze if the genes, HERVs and L1 that showed a differential expression are also differentially expressed in patients, taking ahead the latency model. CD4 cells from 4 HIV infected patients were sequenced in a resting and in an activated state. In the data of Bosque the biggest differences were seen between activated and resting cells, therefore this data shows a lot of differentially expressed genes, HERVs and L1. 
+
+Miguel and Talia Differential Expression
+
+```{r MiguelTalia1,echo=F, message=FALSE,fig.height=5, fig.width=5}
+subset<-coldata[coldata$ProjectName == 'MiguelTalia',c("Activation","HIV","Donor")]
+subset$Group<-factor(paste0(subset$Activation, "_",subset$HIV),
+ levels=c('Resting_Unifected','Resting_HIV','Reactivated_Unifected','Reactivated_HIV')) 
+all<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset)]
+mincount <- 10;minrep <- 2
+all <- all[rowSums(all >= mincount) >= minrep,]
+dds_MT <- DESeqDataSetFromMatrix(countData = all,colData = subset,design =~ Group+Donor)
+dds_MT<-DESeq(dds_MT, fitType = "parametric")
+rlog_MT<-rlog(dds_MT)
+res_AI_RI_MT<-lfcShrink(dds_MT, coef="Group_Reactivated_HIV_vs_Resting_HIV", type="apeglm",svalue=T,lfcThreshold = 0.5)
+up_MT<-rownames(res_AI_RI_MT[res_AI_RI_MT$svalue<=0.1& !is.na(res_AI_RI_MT$svalue)& res_AI_RI_MT$log2FoldChange>=0,])
+down_MT<-rownames(res_AI_RI_MT[res_AI_RI_MT$svalue<=0.1& !is.na(res_AI_RI_MT$svalue)& res_AI_RI_MT$log2FoldChange<=0,])
+
+plotPCA(rlog_MT, intgroup=c("Activation"))
+```
+
+```{r PCA1_MTi,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+rld_MT <- vst(dds_MT, blind=TRUE,fitType = "parametric")
+PCA_LPI <- prcomp(t(assay(rld_MT)))
+percentVar<-round(100*summary(PCA_LPI)$importance[2,1:2],0)
+ploting_PCA_LPI<-data.frame(PCA_LPI$x[,1:2],Activation=dds_MT$Activation,Donor=dds_MT$Donor, Treatment=dds_MT$Group)
+pca<-ggplot(data=ploting_PCA_LPI)+
+  geom_point(aes(x=PC1,y=PC2,colour=Treatment, shape=Donor),size=5)+
+  scale_color_manual(values=c("red","orange","blue","cyan"),labels=c("Resting HIV", "Resting Uninfected","Reactivated HIV", "Reactivated Uninfected"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance"))+
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))+
+  scale_shape_manual(values=c(15:18))+
+  theme(text = element_text(size=30), axis.text=element_text(size=20))
+ggsave("PCA_MT.tiff", plot=pca, device="tiff", dpi=300, width=40,height = 30, units="cm",compression = "lzw")
+```
+
+
+The PCA shows that the variance between samples is due the activation state.
+
+Differentially expression look like this:
+
+```{r MiguelTalia1a,echo=F, message=FALSE,fig.height=5, fig.width=5}
+pheatmap(counts(dds_MT, normalized=T)[union(down_MT,up_MT),],scale = "row", annotation_col = subset[,c(3,4)], show_rownames = F, color = viridis(50,begin = 1,end=0), cutree_rows = 2, cutree_cols = 2,border_color = NA)
+
+```
+
+```{r PCA1_MTi,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+anncol<-subset[,c(3,4)]
+colnames(anncol)<-c("Donor","Treatment")
+anncol$Treatment<-gsub("_", " ", anncol$Treatment)
+anncol$Treatment<-factor(anncol$Treatment,
+                         levels=c("Resting HIV","Reactivated HIV"))
+anncol$Donor<-c("D001","D001","D020","D020","D021","D021","D022","D022")
+pheatmap(counts(dds_MT, normalized=T)[union(down_MT,up_MT),],
+         scale = "row", annotation_col = anncol,
+         show_rownames = F, color = viridis(50,begin = 1,end=0),
+         cutree_rows = 2, cutree_cols = 2,border_color = NA,treeheight_col=100,treeheight_row=100,
+         fontsize_col=20,legend_breaks=c(-2,0,2),
+         annotation_colors=list(
+           Treatment=c("Resting HIV"="red","Reactivated HIV"="blue"),
+           Donor=c(D001=cividis(4)[1],D020=cividis(4)[2],
+                   D021=cividis(4)[3],D022=cividis(4)[4])),
+         annotation_names_col=F, filename="MT_heatmap.tiff", width=20, height = 20, 
+         fontsize=30,lwd=3)
+```
+
+```{r MiguelTalia2,echo=F,fig.height=1, fig.width=2}
+
+kable(data.frame("Under-Expressed"= c(length(grep(pattern = '^NR|^NM',up_MT, invert=F, value = T)),length(grep(pattern = '^NR|^NM|^L1',up_MT, invert=T, value = T)),length(grep(pattern = '^L1',up_MT, invert=F, value = T))),
+           "Over-Expressed"= c(length(grep(pattern = '^NR|^NM',down_MT, invert=F, value = T)),length(grep(pattern = '^NR|^NM|^L1',down_MT, invert=T, value = T)),length(grep(pattern = '^L1',down_MT, invert=F, value = T))), row.names = c("Genes","HERVs","L1")),floating.environment="sidewaystable")
+```
+
+Intersection between differentially expressed Genes/HERVs/L1 found in Bosque latency model and Miguel and Talia samples:
+
+```{r MiguelTalia2a,echo=F,fig.height=2, fig.width=3}
+grid.newpage()
+grid.draw(venn.diagram(x=list(up_MT,up_Bosque),filename=NULL,
+             category.names = c("DE downregulated Miguel Talia","DE downregulated Bosque"),
+             fill = c('royalblue1', 'lightskyblue'),lwd=2,lty='blank',cex=1, cat.cex=1, cat.default.pos = "outer",cat.pos = c(0,240)))
+grid.newpage()
+grid.draw(venn.diagram(x=list(down_MT,down_Bosque),filename=NULL,
+             category.names = c("DE upregulated Miguel Talia","DE upregulated Bosque"),
+             fill = c('indianred2', 'coral'),lwd=2,lty='blank',cex=1, cat.cex=1,  cat.default.pos = "outer",cat.pos = c(0,240)))
+
+```
+
+Individual intersected differentially expressed transcripts look like this:
+
+```{r MiguelTalia3,echo=F,fig.height=9, fig.width=10}
+gout2<-list()
+UP_M_Bosque<-intersect(up_MT,up_Bosque)
+DOWN_M_Bosque<-intersect(down_MT,down_Bosque)
+for (i in union(UP_M_Bosque,DOWN_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_MT,gene=x, intgroup = c("Group", "Donor"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_HIV", "Activated_HIV"),order=T)
+  gout2[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count))+
+  geom_point( aes(color=Donor), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 3)+
+  scale_color_viridis_d(option = "B")+
+  scale_fill_viridis_d(option = "B")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=5,plotlist = gout2)
+
+```
+
+```{r MiguelTalia3i,eval=F,echo=F, message=FALSE,fig.height=3, fig.width=4}
+for (i in union(UP_M_Bosque,DOWN_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_MT,gene=x, intgroup = c("Group", "Donor"), returnData = T)
+  dat4plot$Donor<-factor(c("D001","D001","D020","D020","D021","D021","D022","D022"))
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_HIV", "Reactivated_HIV"),order=T)
+  pd<- position_dodge(0.4)
+  graout<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_bar(data=data.frame(h=c(rep(max(dat4plot$count)*1.1,2)),
+                             g=factor(levels(dat4plot$Group), levels=levels(dat4plot$Group))),
+             aes(x=g, y=h),fill=c("red","blue"),stat="identity", width=1, lwd=1.2,alpha=0.75)+
+  geom_boxplot(aes(x=Group,y=count),color="black")+
+  geom_point(position = pd,aes(color=Donor),size = 5)+
+  geom_line(position = pd,aes(group=Donor,color=Donor),lwd=1.3)+
+  scale_color_viridis_d(option = "E")+
+  scale_fill_viridis_d(option = "E")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("Normalized Count")+
+  scale_x_discrete(breaks=levels(dat4plot$Group),
+                     labels=c('Resting HIV','Reactivated HIV'))+
+    ylab("Normalized Count")+
+    theme(axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 35, hjust = 1,size=25),
+          text=element_text(size = 30),
+          plot.title = element_text(size = 40),
+          axis.text.y =element_text(size = 25))
+  fname<-paste0(x,"_MT.tiff")
+  ggsave(filename = fname,plot=graout,device = "tiff",dpi=300,width = 30,height = 30,units = "cm",compression = "lzw")
+}
+
+write.table(counts(dds_MT,normalized=T)[rownames(counts(dds_MT))%in% union(down_Bosque,up_Bosque),], file="MT_DE_normalizedCounts.txt",quote=F,sep="\t")
+subset2<-subset
+subset2$Donor<-c("D001","D001","D020","D020","D021","D021","D022","D022")
+write.table(subset2, file="Samples_MT.txt", quote=F,sep="\t")
+
+
+```
+
+
+HERVs and L1s only:
+
+```{r MiguelTalia4,echo=F,fig.height=3}
+gout3<-list()
+for (i in grep(pattern = '^NR|^NM',union(UP_M_Bosque,DOWN_M_Bosque), invert=T, value = T)){
+  x<-i
+  dat4plot<-plotCounts(dds_MT,gene=x, intgroup = c("Group", "Patient"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_HIV","Activated_HIV"),order=T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+  scale_color_viridis_d(option = "B")+
+  scale_fill_viridis_d(option = "B")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(x)+ylab("Normalized Count")+xlab("")+
+  theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust = 1),text = element_text(size=10))
+}
+plot_grid(ncol=2,plotlist = gout3)
+```
+
+It is worth to mention that these are differentially expressed in Bosque samples such that Resting Infected is either over or under expressed against all different samples (Resting Uninfected, Activated Infected and Activated Uninfected), and are also differentially expressed in Miguel and Talia samples (the same way up or down as detected in Bosque data set). 
+
+Most of the Genes differentially expressed in Bosque latency model are not differentially expressed in Miguel and Talia samples. Only for visualization and maybe showing a tendency I can plot any gene. For example:
+
+
+
+```{r MiguelTalia4a,echo=F,fig.height=3}
+temp<-c("MER4B_Xq26.2a","NM_152240")
+gout3<-list()
+for (i in temp){
+  x<-i
+  dat4plot<-plotCounts(dds_MT,gene=x, intgroup = c("Group", "Patient"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("Resting_HIV","Activated_HIV"),order=T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+  scale_color_viridis_d(option = "B")+
+  scale_fill_viridis_d(option = "B")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("Normalized Count")+xlab("")+
+  theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust = 1),text = element_text(size=10))
+}
+plot_grid(ncol=2,plotlist = gout3)
+```
+
+
+
+## Sherill-mix Samples (infection)
+
+```{r Sherill-mix1,echo=F, message=FALSE,fig.height=5, fig.width=5}
+subset<-coldata[grep(coldata$ProjectName,pattern = "Sherill"),c("HIV","Donor")]
+all<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset)]
+annotation_sub_sherill<-c(annotation_g,rownames(cts_h),rownames(cts_l))
+mincount <- 10;minrep <- 4
+expressed<-rowSums(all >= mincount) >= minrep
+all <- all[expressed,]
+annotation_sub_sherill <-annotation_sub_sherill[expressed]
+dds_sherill <- DESeqDataSetFromMatrix(countData = all,colData = subset,design =~ HIV)
+dds_sherill <- DESeq(dds_sherill, fitType = "parametric")
+
+rlog_sherill<-rlog(dds_sherill)
+res_U_I_sherill<-lfcShrink(dds_sherill, coef="HIV_Uninfected_vs_HIV", type="apeglm",svalue=T,lfcThreshold = 0.5)
+
+up_sherill<-rownames(res_U_I_sherill[res_U_I_sherill$svalue<=0.1& !is.na(res_U_I_sherill$svalue)& res_U_I_sherill$log2FoldChange>=0,])
+down_MT<-rownames(res_U_I_sherill[res_U_I_sherill$svalue<=0.1& !is.na(res_U_I_sherill$svalue)& res_U_I_sherill$log2FoldChange<=0,])
+
+plotPCA(rlog_sherill, intgroup=c("HIV"))
+```
+
+```{r}
+v_sherill<-EnhancedVolcano(res_U_I_sherill, lab = annotation_sub_sherill, x = 'log2FoldChange', y = 'svalue',
+                pCutoff=0.1, FCcutoff = 0.5, title="HIV vs Uninfected", subtitle = "",
+                caption="", legendVisible=F, drawConnectors = FALSE,widthConnectors = 1,
+                ylim=c(0,50),
+                selectLab=grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T),
+                colConnectors = 'black',boxedlabels = FALSE,transcriptPointSize = 3.0)
+
+
+bmulder<-"HML2_1q22"
+gout3<-list()
+#intersect(rownames(dds_sherill), grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T))
+#for (i in c("HML2_1q22",intersect(rownames(dds_sherill), grep(pattern = '^NR|^NM',c(down_Bosque,up_Bosque),value=T, invert = T)))){
+for (i in rownames(res_U_I_sherill)[grep(annotation_sub_sherill, pattern="FUS")]){
+  
+  x<-i
+  dat4plot<-plotCounts(dds_sherill,gene=x, intgroup = c("HIV","Donor"), returnData = T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=HIV,y=count))+
+  geom_boxplot(aes(x=HIV,y=count))+
+  geom_point( aes(color=Donor), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 5)+
+  scale_color_viridis_d(option = "B")+
+  scale_fill_viridis_d(option = "B")+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(x)+ylab("Normalized Count")+xlab("")+
+  theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust = 1),text = element_text(size=10))
+}
+plot_grid(ncol=2,plotlist = gout3)
+
+```
+
+
+
+## HIV latency and Reactivation
+
+Mohammadi et al. [-@mohammadi] describe the method they used as a model for HIV latency and they takes samples every 2 weeks until week 10 when they started different activation procedures. Here I chose antiCD3 activation, but we have also DMSO, SAHA, disu, aza and IL-7. On this work they do not sequenced replicates which implies the loss of statistics and the data set works only for visualization. The following graphs shows the normalized expression values in the latent establishment (right of the line) and at 3 time points after antiCD3 activation:
+
+```{r Mohammadi, echo=F,fig.height=10, fig.width=12,message=FALSE}
+subset<-coldata[coldata$ProjectName == 'Mohammadi/Telenti',c("Activation","HIV", "Time")]
+subset_a<- subset[grep(subset$Time,pattern='w'),]
+subset_b<- subset[grep(subset$Time,pattern='w',invert=T),]
+subset_b<- subset_b[grep(subset_b$Activation,pattern='antiCD3'),]
+subset_c<-rbind(subset_a,subset_b)
+
+mincount <- 10;minrep <- 2
+all_c<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset_c)]
+all_c <- all_c[rowSums(all_c >= mincount) >= minrep,]
+
+dds_T_c <- DESeqDataSetFromMatrix(countData = all_c,colData = subset_c,design =~ HIV+Time)
+dds_T_c<-DESeq(dds_T_c, fitType = "parametric")
+
+rownames(annotation)<-annotation$RefSeq.mRNA.ID
+
+
+UP_timeMOHA_c<-melt(counts(dds_T_c,normalized=T)[UP_M_Bosque,]+1)
+colnames(UP_timeMOHA_c)<- c("Gene","Sample","Value")
+UP_timeMOHA_c$HIV<-factor(subset_c[UP_timeMOHA_c$Sample,2],levels=c("HIV","Negative"))
+UP_timeMOHA_c$Time<-factor(subset_c[UP_timeMOHA_c$Sample,3], levels=c("w0","w2","w4","w6","w8","w10", "8hrs","24hrs","72hrs"))
+UP_timeMOHA_c$Name<-factor(annotation[as.character(UP_timeMOHA_c$Gene),2])
+ggplot(data=UP_timeMOHA_c,aes(x=Time,y=Value,group=interaction(Name,HIV)))+
+  geom_line(color="royalblue",aes(lty=HIV))+ geom_vline(xintercept = 6.1)+facet_wrap(~Name, scales="free", ncol=3)+
+  scale_y_log10()+theme_bw()+ggtitle("DE downregulated Bosque and MiguelTalia")
+```
+
+```{r Mohammadi2, echo=F,fig.height=4, fig.width=12}
+DOWN_timeMOHA_c<-melt(counts(dds_T_c,normalized=T)[DOWN_M_Bosque,]+1)
+colnames(DOWN_timeMOHA_c)<- c("Gene","Sample","Value")
+DOWN_timeMOHA_c$HIV<-factor(subset_c[DOWN_timeMOHA_c$Sample,2],levels=c("HIV","Negative"))
+DOWN_timeMOHA_c$Time<-factor(subset_c[DOWN_timeMOHA_c$Sample,3], levels=c("w0","w2","w4","w6","w8","w10", "8hrs","24hrs","72hrs"))
+DOWN_timeMOHA_c$Name<-factor(annotation[as.character(DOWN_timeMOHA_c$Gene),2])
+ggplot(data=DOWN_timeMOHA_c,aes(x=Time,y=Value,group=interaction(Name,HIV)))+
+  geom_line(color="red",aes(lty=HIV))+ geom_vline(xintercept = 6.1)+facet_wrap(~Name, scales="free", ncol=3)+
+  scale_y_log10()+theme_bw()+ggtitle("DE upregulated Bosque and MiguelTalia")
+```
+
+There are some interesting Genes that keep showing the tendency of over/under expression showed in Bosque and Miguel and Talia data sets. Interesting genes in my opinion:
+
+* Downregulated
+
+  [NM_000758](https://www.ncbi.nlm.nih.gov/nuccore/NM_000758), [NM_001199053](https://www.ncbi.nlm.nih.gov/nuccore/NM_001199053), [NM_001256403](https://www.ncbi.nlm.nih.gov/nuccore/NM_001256403), [NM_003903](https://www.ncbi.nlm.nih.gov/nuccore/NM_003903), [NM_025155](https://www.ncbi.nlm.nih.gov/nuccore/NM_025155), [NR_038461](https://www.ncbi.nlm.nih.gov/nuccore/NR_038461)
+
+* Upregulated
+  
+  [NM_001039743](https://www.ncbi.nlm.nih.gov/nuccore/NM_001039743), [NM_001317993](https://www.ncbi.nlm.nih.gov/nuccore/NM_001317993), L1FLnI_3q26.32u
+
+
+Keeping up the show of graphs:
+
+```{r Mohammadi3, echo=F,fig.height=2, fig.width=12}
+
+Other_timeMOHA_c<-melt(counts(dds_T_c,normalized=T)[temp,]+1)
+colnames(Other_timeMOHA_c)<- c("Gene","Sample","Value")
+Other_timeMOHA_c$HIV<-factor(subset_c[Other_timeMOHA_c$Sample,2],levels=c("HIV","Negative"))
+Other_timeMOHA_c$Time<-factor(subset_c[Other_timeMOHA_c$Sample,3], levels=c("w0","w2","w4","w6","w8","w10", "8hrs","24hrs","72hrs"))
+Other_timeMOHA_c$Name<-factor(annotation[as.character(Other_timeMOHA_c$Gene),2])
+ggplot(data=Other_timeMOHA_c,aes(x=Time,y=Value,group=interaction(Name,HIV)))+
+  geom_line(color="darkgreen",aes(lty=HIV))+ geom_vline(xintercept = 6.1)+facet_wrap(~Name, scales="free", ncol=3)+
+  scale_y_log10()+theme_bw()
+```
+
+
+
+##Douek Cell T cell subsets
+
+There is another work of Boritz et al. [-@BORITZ] looking for the reservoir and trying to understand it based on RNA-seq. They chose people with natural control of the virus who were not receiving ART. PBMC was isolated among 15 HIV controllers and CD4 T cells were sorted in 4 categories; Naïve, Central Memory, Transitional Memory and Effector Memory. Additionally, the have CD4 T cells from lymph node samples matched with PBMC from 4 patients. The T cells from lymph node were sorted into naïve (N), (2) non-germinal center T-follicular helpers (nGC), (3) germinal center T-follicular helpers (Tfh), (4) effector memory (EM), and (5) other central memory-like subsets (CMPD1lo57lo). The limitation of this study is the lack of healthy donors and control samples. 
+
+Just for visualization I looked for the DE Genes/HERVs/L1 found in Bosque latency model and in Miguel and Talia samples, y-axis are normalized gene counts. The following genes are not DE since the comparison with controls is not possible. Nevertheless, we can discuss possible analysis to this data:
+
+####PBMC
+
+Downregulated
+
+```{r Boritz1, echo=F,fig.height=12, fig.width=12}
+subset<-coldata[coldata$ProjectName == 'Boriz',c("Cell","Patient", "Procendece")]
+subset_a<- subset[grep(subset$Procendece,pattern='PBMC'),]
+subset_b<- subset[subset$Procendece!='PBMC'|subset$Patient %in% unique(subset$Patient[grep(subset$Procendece,pattern='PBMC',invert=T)]),]
+subset_b<- subset_b[grep(subset_b$Cell,pattern='CMPF1lo57hi',invert=T),]
+subset_b$Group<-paste0(subset_b$Procendece,"_",subset_b$Cell)
+
+mincount <- 10;minrep <- 6
+all_a<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset_a)]
+all_a <- all_a[rowSums(all_a >= mincount) >= minrep,]
+
+#dds_BOR_a <- DESeqDataSetFromMatrix(countData = all_a,colData = subset_a,design =~ Cell+Patient)
+#dds_BOR_a<-DESeq(dds_BOR_a, fitType = "parametric")
+#saveRDS(dds_BOR_a,file="Boritz_ddsObject.rds")
+dds_BOR_a<-readRDS("Boritz_ddsObject.rds")
+
+gout3<-list()
+for (i in intersect(rownames(all_a),UP_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_a,gene=x, intgroup = c("Cell", "Patient"), returnData = T)
+  dat4plot$Cell <- factor(dat4plot$Cell,levels = c("N", "CM","TM","EM"),order=T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=Cell,y=count))+
+  geom_boxplot(aes(x=Cell,y=count))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 3)+
+  scale_color_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_fill_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=4,plotlist = gout3)
+
+```
+
+Upregulated
+
+```{r Boritz1a, echo=F,fig.height=4, fig.width=12}
+gout3<-list()
+for (i in intersect(rownames(all_a),DOWN_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_a,gene=x, intgroup = c("Cell", "Patient"), returnData = T)
+  dat4plot$Cell <- factor(dat4plot$Cell,levels = c("N", "CM","TM","EM"),order=T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=Cell,y=count))+
+  geom_boxplot(aes(x=Cell,y=count))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 3)+
+  scale_color_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_fill_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=4,plotlist = gout3)
+```
+
+
+
+```{r Boritz1b, echo=F,fig.height=2, fig.width=12}
+gout3<-list()
+for (i in intersect(rownames(all_a),temp)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_a,gene=x, intgroup = c("Cell", "Patient"), returnData = T)
+  dat4plot$Cell <- factor(dat4plot$Cell,levels = c("N", "CM","TM","EM"),order=T)
+  gout3[[i]]<-ggplot(dat4plot,aes(x=Cell,y=count))+
+  geom_boxplot(aes(x=Cell,y=count))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 3)+
+  scale_color_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_fill_manual(values=c(rainbow(14)[1:8],rainbow(14)[9],rgb(t(col2rgb(rainbow(14)[9])),alpha = 175,max=255),rainbow(14)[10:14] ))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=4,plotlist = gout3)
+```
+
+
+
+####PBMC + Lymp Node
+
+Light orange box plots are T cell subtypes from PBMC while light pink box plots are T cell subtypes from lymph node.
+
+Downregulated
+
+```{r Boritz2, echo=F,fig.height=10, fig.width=7}
+mincount <- 10;minrep <- 4
+all_b<- round(rbind(cts_g,cts_h,cts_l),0)[,rownames(subset_b)]
+all_b <- all_b[rowSums(all_b >= mincount) >= minrep,]
+
+#dds_BOR_b <- DESeqDataSetFromMatrix(countData = all_b,colData = subset_b,design =~ Group+Patient)
+#dds_BOR_b<-DESeq(dds_BOR_b, fitType = "parametric")
+#saveRDS(dds_BOR_b,file="Boritz_ddsObject2.rds")
+dds_BOR_b<-readRDS("Boritz_ddsObject2.rds")
+
+gout4<-list()
+for (i in intersect(rownames(all_b),UP_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_b,gene=x, intgroup = c("Group", "Patient","Procendece"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("PBMC_N", "PBMC_CM","PBMC_TM","PBMC_EM","LymphNode_N","LymphNode_CMPF1lo57lo","LymphNode_nGC","LymphNode_Tfh","LymphNode_EM"),order=T)
+  gout4[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count,fill=Procendece))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 1.5)+
+  scale_color_manual(values = rainbow(4))+
+  scale_x_discrete(labels=c("PBMC_N"="N", "PBMC_CM"="CM","PBMC_TM"="TM",
+                            "PBMC_EM"="EM","LymphNode_N"="N","LymphNode_CMPF1lo57lo"="CMPF1 low",
+                            "LymphNode_nGC"="nGC","LymphNode_Tfh"="Tfh","LymphNode_EM"="EM"))+
+  scale_fill_manual(values = c(rgb(t(col2rgb("hotpink")),alpha = 125,max=255),rgb(t(col2rgb("orangered")),alpha = 125,max=255)))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=3,plotlist = gout4)
+
+```
+
+Upregulated:
+
+```{r Boritz2a, echo=F,fig.height=4, fig.width=7}
+gout4<-list()
+for (i in intersect(rownames(all_b),DOWN_M_Bosque)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_b,gene=x, intgroup = c("Group", "Patient","Procendece"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("PBMC_N", "PBMC_CM","PBMC_TM","PBMC_EM","LymphNode_N","LymphNode_CMPF1lo57lo","LymphNode_nGC","LymphNode_Tfh","LymphNode_EM"),order=T)
+  gout4[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count,fill=Procendece))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 1.5)+
+  scale_color_manual(values = rainbow(4))+
+  scale_x_discrete(labels=c("PBMC_N"="N", "PBMC_CM"="CM","PBMC_TM"="TM",
+                            "PBMC_EM"="EM","LymphNode_N"="N","LymphNode_CMPF1lo57lo"="CMPF1 low",
+                            "LymphNode_nGC"="nGC","LymphNode_Tfh"="Tfh","LymphNode_EM"="EM"))+
+  scale_fill_manual(values = c(rgb(t(col2rgb("hotpink")),alpha = 125,max=255),rgb(t(col2rgb("orangered")),alpha = 125,max=255)))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=3,plotlist = gout4)
+```
+
+```{r Boritz2b, echo=F,fig.height=2, fig.width=7}
+gout4<-list()
+for (i in intersect(rownames(all_b),temp)){
+  x<-i
+  dat4plot<-plotCounts(dds_BOR_b,gene=x, intgroup = c("Group", "Patient","Procendece"), returnData = T)
+  dat4plot$Group <- factor(dat4plot$Group,levels = c("PBMC_N", "PBMC_CM","PBMC_TM","PBMC_EM","LymphNode_N","LymphNode_CMPF1lo57lo","LymphNode_nGC","LymphNode_Tfh","LymphNode_EM"),order=T)
+  gout4[[i]]<-ggplot(dat4plot,aes(x=Group,y=count))+
+  geom_boxplot(aes(x=Group,y=count,fill=Procendece))+
+  geom_point( aes(color=Patient), alpha=0.75,position=position_jitter(w=0.2,h=0),size = 1.5)+
+  scale_color_manual(values = rainbow(4))+
+  scale_x_discrete(labels=c("PBMC_N"="N", "PBMC_CM"="CM","PBMC_TM"="TM",
+                            "PBMC_EM"="EM","LymphNode_N"="N","LymphNode_CMPF1lo57lo"="CMPF1 low",
+                            "LymphNode_nGC"="nGC","LymphNode_Tfh"="Tfh","LymphNode_EM"="EM"))+
+  scale_fill_manual(values = c(rgb(t(col2rgb("hotpink")),alpha = 125,max=255),rgb(t(col2rgb("orangered")),alpha = 125,max=255)))+
+  #scale_y_log10()+ggtitle(x)+ylab("Normalized Count (log)")+xlab("")+
+  ggtitle(as.character(annotation$Gene.name[which(annotation$RefSeq.mRNA.ID == x)]))+ylab("")+xlab("")+
+  theme_bw()+theme(text = element_text(size=10),legend.position="none",plot.margin=margin(l=0,unit="cm", b=0,r=0))
+}
+
+plot_grid(ncol=3,plotlist = gout4)
+```
+
+# References
+
